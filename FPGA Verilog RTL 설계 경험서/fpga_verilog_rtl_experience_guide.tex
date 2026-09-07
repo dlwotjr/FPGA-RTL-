@@ -1,0 +1,185 @@
+\documentclass[11pt,a4paper,openany]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage{kotex}
+\usepackage{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{array,booktabs,longtable,tabularx,makecell}
+\usepackage{listings}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[most]{tcolorbox}
+\usepackage{setspace}
+\usepackage{lastpage}
+\usepackage{graphicx}
+\usepackage{parskip}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit}
+
+\geometry{margin=18mm}
+\setlength{\headheight}{15pt}
+\setstretch{1.12}
+\setlist[itemize]{leftmargin=20pt,itemsep=3pt,topsep=4pt}
+\setlist[enumerate]{leftmargin=22pt,itemsep=3pt,topsep=4pt}
+\setcounter{tocdepth}{2}
+\setcounter{secnumdepth}{3}
+\renewcommand{\contentsname}{목차}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=MidnightBlue,
+  urlcolor=MidnightBlue,
+  pdftitle={FPGA/Verilog RTL 설계 경험서},
+  pdfauthor={JaeSeok Lee}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{FPGA/Verilog RTL 설계 경험서}
+\fancyhead[R]{\thepage/\pageref{LastPage}}
+\fancyfoot[C]{Unified NTT RTL 사례로 배우는 area와 timing 설계}
+
+\definecolor{codebg}{RGB}{247,247,247}
+\definecolor{accent}{RGB}{24,84,148}
+\definecolor{lightaccent}{RGB}{233,240,248}
+\definecolor{goodbg}{RGB}{236,248,240}
+\definecolor{warnbg}{RGB}{255,247,230}
+\definecolor{tradebg}{RGB}{244,242,251}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\lstdefinelanguage{VerilogCustom}{
+  language=Verilog,
+  morekeywords={logic,always_ff,always_comb,localparam,generate,endgenerate,signed,unsigned}
+}
+\lstset{
+  language=VerilogCustom,
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{black!20},
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  keywordstyle=\color{MidnightBlue}\bfseries,
+  commentstyle=\color{ForestGreen!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{black!45},
+  stepnumber=1,
+  numbersep=7pt,
+  aboveskip=8pt,
+  belowskip=8pt
+}
+
+\titleformat{\chapter}{\huge\bfseries\color{accent}}{\thechapter.}{0.7em}{}
+\titleformat{\section}{\Large\bfseries\color{accent}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{accent}}{\thesubsection}{0.6em}{}
+
+\newtcolorbox{summarybox}[1][]{
+  breakable,colback=lightaccent,colframe=accent,boxrule=0.7pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1}}
+\newtcolorbox{warningbox}[1][]{
+  breakable,colback=warnbg,colframe=BurntOrange,boxrule=0.7pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1}}
+\newtcolorbox{goodbox}[1][]{
+  breakable,colback=goodbg,colframe=ForestGreen,boxrule=0.6pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1}}
+\newtcolorbox{tradeoffbox}[1][]{
+  breakable,colback=tradebg,colframe=RoyalPurple,boxrule=0.6pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1}}
+\newtcolorbox{checklistbox}{
+  breakable,colback=white,colframe=MidnightBlue,boxrule=0.7pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,title={실무 체크리스트}}
+
+\newcommand{\rtlfile}[1]{\texttt{#1}}
+\newcommand{\wns}{\ensuremath{\mathrm{WNS}}}
+\newcommand{\ii}{\ensuremath{\mathrm{II}}}
+
+\title{\textbf{FPGA/Verilog RTL 설계 경험서}\\[4pt]
+\large Unified NTT RTL 사례로 배우는 Area와 Timing 설계}
+\author{JaeSeok Lee \\ Kookmin University}
+\date{September 7, 2026}
+
+\begin{document}
+
+\hypersetup{pageanchor=false}
+\pagenumbering{roman}
+\begin{titlepage}
+\thispagestyle{empty}
+\vspace*{0.15\textheight}
+{\centering
+{\Huge\bfseries\color{accent} FPGA/Verilog RTL 설계 경험서\par}
+\vspace{0.8cm}
+{\Large Unified NTT RTL 사례로 배우는 Area와 Timing 설계\par}
+\vspace{1.0cm}
+{\large LUT, FF, CARRY4, DSP48E1, BRAM, fanout, routing,\\
+pipeline, inference, interface, verification\par}
+}
+\vfill
+{\centering \large JaeSeok Lee\\Kookmin University\\September 7, 2026\par}
+\vspace{1.2cm}
+\begin{center}\rule{0.82\textwidth}{0.7pt}\end{center}
+\begin{center}{\large 합성 보고서에서 출발해 RTL 구조로 해결하는 설계 기록}\end{center}
+\vspace*{0.06\textheight}
+\end{titlepage}
+
+\chapter*{개정판을 읽는 방법}
+\addcontentsline{toc}{chapter}{개정판을 읽는 방법}
+
+이 책은 문법별 장난감 예제를 나열하는 대신, 하나의 실제 설계가 100~MHz에서
+150~MHz로 발전한 과정을 따라간다. 사례는 radix-2, radix-3, trinomial 변환을
+지원하는 Unified NTT 가속기이며, 비교 대상은 다음 세 시점이다.
+
+\begin{itemize}
+  \item \textbf{최초 100~MHz RTL}: \rtlfile{old/rtl\_verilog}
+  \item \textbf{200~MHz 목표 실험판}: \rtlfile{rtl\_verilog\_200mhz}
+  \item \textbf{최종 MC V5 RTL}: \rtlfile{rtl\_verilog\_mc}
+\end{itemize}
+
+중간 디렉터리의 ``200mhz''는 목표 이름이다. 5.000~ns 제약에서 실제 timing은
+닫히지 않았으며 post-route \wns는 $-3.563$~ns였다. 최종판은 완전한 Zynq
+시스템과 standalone RTL에서 150~MHz를 만족한다. 이 구분은 결과를 과장하지
+않고, 실패한 시도까지 설계 판단의 근거로 남기기 위해 중요하다.
+
+각 사례는 \textbf{관찰한 보고서}, \textbf{RTL에서 찾은 원인},
+\textbf{선택한 구조}, \textbf{검증해야 할 계약}, \textbf{측정 결과} 순으로
+설명한다. 코드 조각은 이해에 필요한 부분만 줄여 싣고, 정확한 신호 연결과
+파라미터는 위 RTL 파일을 기준으로 한다.
+
+\begin{warningbox}[수치 해석 원칙]
+서로 다른 device package, top-level, clock constraint의 결과를 단일 변수
+실험처럼 해석하지 않는다. 이 책의 100~MHz와 150~MHz 수치는 실제 개발
+milestone을 보여 주는 역사적 비교다. 인과관계는 matched run이 있는 경우에만
+그 범위 안에서 말한다.
+\end{warningbox}
+
+\tableofcontents
+\newpage
+\hypersetup{pageanchor=true}
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+\input{chapters/01_hardware_view}
+\input{chapters/02_measurement}
+\input{chapters/03_architecture}
+\input{chapters/04_timing_cases}
+\input{chapters/04a_frequency_journal}
+\input{chapters/05_area_cases}
+\input{chapters/05a_operator_cost}
+\input{chapters/06_arithmetic}
+\input{chapters/07_schedule_interface}
+\input{chapters/08_verification}
+\input{chapters/09_workflow}
+\input{chapters/10_results}
+
+\appendix
+\input{chapters/a_glossary}
+\input{chapters/b_references}
+
+\end{document}

@@ -1,0 +1,128 @@
+\chapter{최적화를 깨지 않게 검증하는 방법}
+
+\section{검증 대상은 값, cycle, protocol 세 층이다}
+
+수학 결과만 같다고 hardware optimization이 끝난 것은 아니다. pipeline을 바꾼
+뒤에는 다음 세 층을 따로 확인한다.
+
+\begin{longtable}{L{28mm}L{61mm}L{72mm}}
+\toprule
+층 & 확인할 계약 & 이 사례의 예 \\
+\midrule
+Value & modular result와 transform coefficient & multiplier/butterfly/full NTT reference 비교 \\
+Cycle & input, result, valid, last, address tag 정렬 & issue-to-writeback latency, layer done lookahead \\
+Protocol & ready/valid, backpressure, reset, phase exclusivity & AXI gap/TREADY stall/TLAST, LOAD--CORE--DUMP \\
+\bottomrule
+\end{longtable}
+
+\section{latency를 하나의 상수로 관리한다}
+
+최종 core는 \rtlfile{XXX\_ISSUE\_TO\_WB\_LAT=13}을 definitions file에 한 번만
+정의한다. top과 core가 서로 다른 숫자를 localparam으로 가지면 arithmetic
+latency 수정 후 metadata pipeline이 조용히 어긋날 수 있다.
+
+testbench에서는 다음 사건의 cycle 차이를 검사한다.
+
+\begin{enumerate}
+  \item address generator의 issue valid
+  \item BRAM read request와 response
+  \item butterfly input acceptance
+  \item writeback valid/address/data
+  \item final writeback과 layer/core done
+\end{enumerate}
+
+valid만 맞추면 충분하지 않다. A/B/C/D address tag와 두 zeta, radix-3의 D-lane
+absence, inverse mode의 twiddle 선택이 같은 transaction을 가리켜야 한다.
+
+\section{assertion으로 optimization 전제를 코드에 남긴다}
+
+최종 RTL의 simulation-only check는 설계자가 area/timing을 줄일 때 사용한 전제를
+검사한다.
+
+\begin{itemize}
+  \item transform 실행 중 crypto, $N$, inverse parameter가 바뀌지 않는다.
+  \item physical row가 576-entry bank 범위를 넘지 않는다.
+  \item 같은 BRAM row에 두 port가 동시에 write하지 않는다.
+  \item multiplier operand와 intermediate signed range가 증명 범위 안에 있다.
+  \item Montgomery의 $T-uq$ low 16 bit가 0이고 최종 값이 $[0,q)$다.
+  \item dump FIFO count와 credit이 depth를 넘지 않는다.
+\end{itemize}
+
+\begin{lstlisting}
+`ifndef SYNTHESIS
+always @(posedge iSYS_CLK) begin
+  if (response && (count_q == FIFO_DEPTH) && !pop)
+    $error("unreserved BRAM response");
+  if (credit_q > FIFO_DEPTH)
+    $error("dump FIFO credit overflow");
+end
+`endif
+\end{lstlisting}
+
+assertion은 test vector가 우연히 문제 조건을 만들지 않아도 내부 계약 위반을
+찾는다. \rtlfile{SYNTHESIS} guard로 production hardware에는 들어가지 않는다.
+
+\section{변경 종류별 필요한 검증}
+
+\begin{longtable}{L{44mm}L{118mm}}
+\toprule
+변경 & 최소 검증 \\
+\midrule
+Register 위치/latency 변경 & cycle scoreboard, valid/last/address alignment, back-to-back transaction \\
+Bit width/signed 변경 & 경계값, random arithmetic, range assertion \\
+Memory mapping 변경 & 전 주소 bijection, row bound, bank/port conflict, roundtrip \\
+BRAM coding template 변경 & simulation read-during-write semantics와 synthesis inference report \\
+FIFO/credit 변경 & random source gap와 destination backpressure, overflow/duplicate/loss check \\
+Mode sharing 변경 & mode별 unit test와 mode-stability assertion \\
+Scheduler 변경 & issue sequence, per-layer count, all transform roundtrip/reference \\
+\bottomrule
+\end{longtable}
+
+\section{실행 가능한 regression}
+
+Companion AXI4-Stream 저장소 root에서 최종 RTL regression을 실행한다.
+
+\begin{lstlisting}[language=bash,numbers=none]
+./tool_sim/run_all.sh
+\end{lstlisting}
+
+성공 시 다음 다섯 test가 각각 PASS로 표시된다.
+
+\begin{enumerate}
+  \item memory mapping: bijection과 radix-2 bank balance
+  \item unified modular multiplier: 30 arithmetic cases
+  \item unified butterfly: 14 radix-2/radix-3/trinomial cases
+  \item full NTT/INTT: 지원하는 8 configuration
+  \item AXI integration: source gap, backpressure, TLAST
+\end{enumerate}
+
+마지막 줄은 \texttt{ALL\_AXI\_STREAM\_TESTBENCHES\_PASS}다. 보존한 100~MHz
+baseline은 다음처럼 실행한다.
+
+\begin{lstlisting}[language=bash,numbers=none]
+./old/tool_sim/run_all.sh
+\end{lstlisting}
+
+이 regression은 unified butterfly, ML-KEM radix-2 roundtrip, NTRU+768의
+trinomial/radix-3/radix-2 roundtrip을 검사하고 3/3 PASS를 출력한다. 두 suite는
+변경 전후 모두 실행 가능하므로 ``새 코드만 맞는다''가 아니라 보존 baseline의
+동작도 재확인할 수 있다.
+
+\section{simulation PASS와 implementation PASS를 구분한다}
+
+Icarus regression은 기능과 protocol을 확인하지만 DSP48E1 placement, BRAM
+inference, timing closure를 증명하지 않는다. 최종 acceptance에는 다음이 모두
+필요하다.
+
+\begin{itemize}
+  \item RTL regression PASS
+  \item synthesis에서 DSP 4개와 의도한 BRAM 확인
+  \item post-route setup/hold failing endpoint 0
+  \item bitstream 생성과 DRC error 0
+  \item board KAT/reference 비교 PASS
+  \item benchmark의 clock와 measurement interval 기록
+\end{itemize}
+
+이 사례의 packed-BRAM board binary는 benchmark 전에 6개 scheme의 NTT와 INTT,
+총 12개 transform을 software reference와 비교했다. completed state가 기록된 뒤
+성능을 측정했으므로 기능 검증과 timing measurement의 실행 순서가 분명하다.

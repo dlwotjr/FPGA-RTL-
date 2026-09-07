@@ -1,0 +1,107 @@
+\chapter{반복 가능한 최적화 workflow}
+
+\section{한 iteration의 순서}
+
+\begin{enumerate}
+  \item \textbf{기준점 고정}: commit, top, part, clock, directives를 기록한다.
+  \item \textbf{기능 baseline}: unit/full/protocol regression을 실행한다.
+  \item \textbf{합성 구조 확인}: BRAM/DSP/SRL inference와 hierarchy area를 본다.
+  \item \textbf{post-route 경로 분류}: memory, arithmetic, control, interface로 나눈다.
+  \item \textbf{가설 하나 선택}: 예를 들어 ``logical mapping이 RAM pin 앞에 있다''.
+  \item \textbf{최소 구조 변경}: register boundary와 metadata contract를 함께 고친다.
+  \item \textbf{회귀}: value/cycle/protocol test를 모두 실행한다.
+  \item \textbf{동일 조건 재구현}: 새 top-$N$ path와 area delta를 기록한다.
+  \item \textbf{유지 또는 폐기}: 개선이 재현될 때만 main branch에 남긴다.
+\end{enumerate}
+
+여러 optimization을 한 번에 넣으면 어떤 변경이 WNS를 움직였는지 알 수 없다.
+다만 서로 분리할 수 없는 구조 변경, 예를 들어 address register와 valid alignment는
+하나의 transaction으로 다뤄야 한다.
+
+\section{Vivado에서 남길 최소 report}
+
+\begin{lstlisting}[language=tcl,numbers=none]
+report_utilization -hierarchical -file utilization_hier_synth.rpt
+report_timing_summary -file timing_summary_synth.rpt
+
+opt_design
+place_design
+phys_opt_design
+route_design
+
+report_utilization -hierarchical -file utilization_hier_post_route.rpt
+report_timing_summary -file timing_summary_post_route.rpt
+report_timing -delay_type max -max_paths 50 \
+              -sort_by slack -file timing_paths_post_route.rpt
+report_drc -file drc_post_route.rpt
+\end{lstlisting}
+
+Post-synthesis report는 inference와 조합 구조를 빠르게 보는 데 유용하다. 최종
+area와 timing 주장은 routing을 포함한 post-route report를 기준으로 한다.
+
+\section{경로를 RTL 질문으로 번역한다}
+
+\begin{longtable}{L{47mm}L{115mm}}
+\toprule
+Report 관찰 & RTL에서 묻는 질문 \\
+\midrule
+RAM address pin이 destination & address mapping, phase mux, enable decode가 한 cycle에 겹치는가? \\
+Route 비율이 80\% 이상 & source/destination이 멀거나 fanout이 큰가? register boundary를 옮길 수 있는가? \\
+Control net fanout이 큼 & 동일 조건을 여러 block에서 재계산하는가? phase 불변조건으로 없앨 수 있는가? \\
+Carry chain이 여러 묶음 연속 & compare/subtract/correct가 직렬인가? range로 correction 횟수를 제한할 수 있는가? \\
+DSP 앞 LUT가 깊음 & mode select 또는 sign/width 변환이 multiplier 입력에 붙었는가? \\
+예상보다 FF가 많음 & lane metadata, debug counter, FIFO payload reset이 필요한가? \\
+BRAM이 0 & port process, reset, read semantics가 inference template과 맞는가? \\
+\bottomrule
+\end{longtable}
+
+\section{실험 기록 형식}
+
+각 변경은 다음 표 한 장으로 남기면 충분하다.
+
+\begin{longtable}{L{39mm}L{123mm}}
+\toprule
+필드 & 기록 내용 \\
+\midrule
+Hypothesis & report와 RTL을 연결한 원인 문장 \\
+Changed files & 실제 수정한 module과 parameter \\
+Preserved contract & latency, II, memory semantics, supported mode \\
+Regression & test 이름과 PASS/FAIL \\
+Synthesis & LUT/FF/BRAM/DSP와 inference warning \\
+Post-route & WNS/TNS/WHS, source/destination, logic/route 비율 \\
+Decision & keep/revert와 이유 \\
+\bottomrule
+\end{longtable}
+
+``WNS가 좋아졌다''만 적으면 placement seed 변화와 구조 개선을 구분하기 어렵다.
+문제 path가 사라졌는지, 동일 class의 endpoint 수가 줄었는지, 새 병목이 어디로
+이동했는지를 함께 기록한다.
+
+\section{이 사례에서 폐기해야 했던 단순 해석}
+
+\begin{itemize}
+  \item \textbf{디렉터리 이름이 달성 주파수다}: 200mhz branch는 200~MHz 미충족이었다.
+  \item \textbf{pipeline이면 무조건 빨라진다}: DUMP를 끊은 뒤 LOAD의 routing 병목이 남았다.
+  \item \textbf{shift/add면 DSP보다 작다}: 여러 mode의 병렬 constant logic은 LUT/carry를 크게 쓸 수 있다.
+  \item \textbf{BRAM attribute면 BRAM이 된다}: port semantics가 맞지 않으면 RAM이 FF로 풀릴 수 있다.
+  \item \textbf{전체 BRAM 차이는 core 차이다}: stream의 추가 3 tile은 DMA FIFO였다.
+  \item \textbf{FF 증가는 실패다}: complete system FF는 늘어도 standalone core는 줄고 timing은 닫힐 수 있다.
+\end{itemize}
+
+이 항목들은 독립적인 ``나쁜 코드 장''으로 반복할 필요가 없다. 각 관찰이 나온
+실제 path와 hierarchy에 붙여 두어야 언제 적용할 수 있는지 알 수 있다.
+
+\section{최종 review checklist}
+
+\begin{checklistbox}
+\begin{itemize}
+  \item RTL과 문서의 parameter, latency, resource 수가 일치한다.
+  \item 사용하지 않는 debug/performance logic은 synthesis에서 제거된다.
+  \item memory depth/width와 실제 RAMB primitive 수가 설명된다.
+  \item top-level별 area 범위가 표 제목에 들어간다.
+  \item unmatched historical comparison에는 caveat가 붙는다.
+  \item core cycle와 end-to-end board latency를 섞지 않는다.
+  \item test 명령과 성공 marker가 저장소에서 바로 실행된다.
+  \item generated report와 artifact에는 tool/version/clock 정보가 남는다.
+\end{itemize}
+\end{checklistbox}

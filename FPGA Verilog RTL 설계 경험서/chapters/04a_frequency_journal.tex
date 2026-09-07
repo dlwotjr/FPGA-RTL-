@@ -1,0 +1,281 @@
+\chapter{150 MHz에 연산을 담기까지}
+
+\section{성공한 회로만 보면 설계 이유가 사라진다}
+
+최종 RTL만 읽으면 register가 왜 그 위치에 있는지 알기 어렵다. 이 설계에서는
+clock constraint를 바꾸고 top timing path를 다시 읽을 때마다 병목의 종류가
+달라졌다. 남아 있는 report와 RTL milestone을 시간 순서로 놓으면 다음과 같다.
+
+\begin{longtable}{L{22mm}L{50mm}L{68mm}}
+\toprule
+시점 & 관찰한 경로와 결과 & 다음 판단 \\
+\midrule
+최초 100~MHz &
+DUMP address $\rightarrow$ BRAM address,
+9.077 ns &
+주소, bank, phase 선택을 BRAM pin 앞에서 끝내는 구조는 더 높은 주파수에
+맞지 않았다. \\
+초기 150~MHz &
+mode select $\rightarrow$ radix-3 subtraction register,
+$\wns=-0.338$ ns &
+한 cycle에 연결된 23-bit carry 연산과 뒤쪽 선택을 분리해야 했다. \\
+200~MHz 산술 실험 &
+DSP product $\rightarrow$ ML-DSA intermediate register,
+8.168 ns &
+product 결합과 reduction digit 계산을 한 register 경계 안에 두지 않기로 했다. \\
+최종 150~MHz &
+standalone, AXI4-Stream, BRAM complete system 모두 timing 충족 &
+목표 주파수를 검증된 production point로 고정하고 세 범위를 따로 보존했다. \\
+\bottomrule
+\end{longtable}
+
+이 표의 각 행은 동일한 단일 변수 실험이 아니다. 개발 중 서로 다른 snapshot을
+나열한 설계 일지다. 따라서 수치 차이 전체를 특정 RTL 변경의 효과로 해석하지
+않는다. 여기서 사용할 수 있는 증거는 “그 시점의 top path가 무엇이었는가”와
+“그 path의 조합 구조를 다음 RTL에서 어떻게 끊었는가”다.
+
+\section{몇 ns가 걸리는지에 대한 직관}
+
+RTL 연산 이름만으로 지연을 고정값처럼 외우면 안 된다. 같은 23-bit addition도
+앞의 operand MUX, 뒤의 result MUX, fanout과 배치 위치에 따라 route delay가
+달라진다. 이 프로젝트에서 실제 관찰한 path를 구성별로 나누면 다음과 같다.
+
+\begin{longtable}{L{45mm}r r r L{45mm}}
+\toprule
+실제 경로 & Logic & Route & Total & 관찰한 구조 \\
+\midrule
+최초 DUMP address $\rightarrow$ BRAM &
+1.681 ns & 7.396 ns & 9.077 ns &
+8 LUT, route 81.5\% \\
+초기 radix-3 subtraction result &
+2.896 ns & 3.781 ns & 6.677 ns &
+11 CARRY4를 포함한 13 levels \\
+200~MHz ML-DSA intermediate &
+4.600 ns & 3.568 ns & 8.168 ns &
+12 CARRY4를 포함한 17 levels \\
+최종 standalone modular-add register &
+2.494 ns & 4.028 ns & 6.522 ns &
+4 CARRY4를 포함한 7 levels \\
+최종 BRAM system $1006x$ table-sum &
+2.920 ns & 3.630 ns & 6.550 ns &
+6 CARRY4를 포함한 10 levels \\
+\bottomrule
+\end{longtable}
+
+여기서 얻는 실무적 직관은 세 가지다.
+
+\begin{enumerate}
+  \item 23-bit carry 연산 두 개와 mode selection이 이어진 path는 이
+        implementation에서 6.677~ns였고 150~MHz에 들어가지 않았다.
+  \item 더 복잡한 product 결합과 field 계산은 8.168~ns였다. 5~ns에
+        맞추려면 식 정리만으로 부족하고 register 또는 DSP 내부 stage가 필요했다.
+  \item logic이 짧아도 BRAM 주변처럼 route가 80\%를 넘으면 9~ns가 될 수 있다.
+        반대로 “adder는 몇 ns”라는 표만으로 system timing을 예측할 수 없다.
+\end{enumerate}
+
+이 수치는 xc7z020 계열, Vivado 2020.2, 해당 placement와 constraint에서 얻은
+경로 측정값이다. 다른 device, speed grade, floorplan과 fanout에는 그대로
+대입하지 않는다. 설계 초기에 필요한 것은 절대값 암기가 아니라
+“carry가 몇 번 직렬인가”, “MUX가 carry 앞뒤 어디에 있는가”,
+“logic보다 route가 큰가”를 구분하는 감각이다.
+
+\section{실패 1: subtract와 correction을 한 cycle에 연결했다}
+
+modular subtraction은 식으로 쓰면 짧다.
+\[
+d=a-b,\qquad r=
+\begin{cases}
+d+q,&d<0,\\
+d,&d\ge0.
+\end{cases}
+\]
+그러나 23-bit RTL에서 raw subtraction, borrow 선택, conditional addition과
+mode-dependent result 선택이 같은 register 앞에 놓이면 carry chain 두 개와
+MUX가 직렬로 합성될 수 있다.
+
+초기 150~MHz post-route report의 top path는 mode register에서
+radix-3 subtraction result register까지였다. 6.667~ns requirement에서 data
+path가 6.677~ns였고, logic 2.896~ns와 route 3.781~ns를 사용했다. 13 logic
+levels 가운데 CARRY4가 11개였다. setup slack은 $-0.338$~ns였다. 이 결과는
+“subtractor 하나가 느리다”보다 다음 사실을 보여 준다.
+
+\begin{itemize}
+  \item carry 결과를 고르는 mode MUX도 같은 path의 일부다.
+  \item 산술 depth와 route가 모두 커서 placement directive만으로 해결하기 어렵다.
+  \item source가 mode register라는 사실은 연산뿐 아니라 control fanout도
+        함께 줄여야 함을 뜻한다.
+\end{itemize}
+
+최종 RTL은 모든 modular subtraction에 새 stage를 추가하지 않았다. multiplier
+앞에서 일찍 필요한 두 general difference만 C1과 C2로 나눴다.
+
+\begin{lstlisting}
+// C1: raw subtraction and borrow
+raw0_c1    <= {1'b0, b} - {1'b0, a};
+borrow0_c1 <= raw0[D];
+
+// C2: conditional correction
+corrected = {1'b0, raw0_c1[D-1:0]} + {1'b0, q};
+d0_c2     <= borrow0_c1 ? corrected[D-1:0]
+                        : raw0_c1[D-1:0];
+\end{lstlisting}
+
+C2는 이 rail에서 원래 alignment에 쓰이던 자리였다. 그러므로 새 latency를
+더하지 않고 기존 register의 일을 바꾸어 두 carry chain을 서로 다른 cycle에
+배치했다. 이 사례에서 핵심 판단은 “pipeline을 한 단계 늘린다”가 아니라
+\textbf{이미 존재하는 alignment stage에 실제 연산을 배치한다}는 것이다.
+
+또한 arithmetic result인 radix-3의 $E$와 $S$를 첫 register에서 공통 A/C rail에
+바로 합치지 않았다. carry chain 직후에 mode MUX가 붙기 때문이다. 첫 register는
+분리하고, 다음 경계에서 이미 등록된 값끼리 merge했다.
+
+\section{실패 2: ML-DSA product 결합과 digit 계산을 함께 수행했다}
+
+200~MHz 실험의 한 post-route top path는 DSP48E1의 product output에서
+\rtlfile{a\_tmp\_buf} register까지였다. 5.000~ns requirement에 data path는
+8.168~ns, logic levels는 17개였고 그중 CARRY4가 12개였다. slack은
+$-3.171$~ns였다.
+
+당시 조합 cone은 low product의 정렬된 high part와 다른 partial product를
+더한 뒤, 그 결과에서 여러 field sum을 연속으로 만들었다. RTL의 수식은 맞고
+simulation도 통과했지만, Vivado가 본 물리 경로에는 긴 carry chain이 남았다.
+“중간 wire 이름을 여러 개 둔다”는 것은 pipeline이 아니다. register edge가
+없으면 모든 식은 여전히 한 cycle의 경로다.
+
+최종 six-stage \rtlfile{unifiedMUL}은 일을 다음처럼 나눈다.
+
+\begin{enumerate}
+  \item DSP0가 16-bit low product를 계산한다.
+  \item DSP1의 MREG/PREG가 ML-DSA high partial product와 aligned cross-sum을
+        받아 외부 fabric의 긴 product-adder 경계를 줄인다.
+  \item C3에서 $H_0+H_1$을 한 번 계산하고 다음 high-part 식에서도 재사용한다.
+        별도 24-bit addition 대신 두 번째 carry chain을 14 bit로 제한한다.
+  \item C4에서 segmented residual, C5에서 base/correction addition,
+        C6에서 constant-selected canonical correction을 수행한다.
+\end{enumerate}
+
+마지막 correction도 high digit과 low digit을 각각 고치는 branch로 표현했을 때
+합성기가 branch MUX와 carry를 깊게 합쳤다. 최종판은 범위 판정으로
+$0,+q,-q,-2q$ 중 correction constant 하나를 고르고 signed addition 한 번만
+수행한다. 수학적으로 같은 식 가운데 FPGA에서 carry와 MUX가 직렬로 놓이지
+않는 표현을 선택한 것이다.
+
+\section{실패 3: Montgomery의 다섯 operand를 한 번에 더했다}
+
+초기 R16 Montgomery path는 선택된 네 shifted operand를 더해
+$c_qT\bmod 2^9$를 만들고, 같은 조합 경로에서 $T[15:7]$까지 더해
+$u[15:7]$을 완성했다.
+
+\begin{lstlisting}
+shift_sum = op0 + op1 + op2 + op3;
+u_hi      = shift_sum + T[15:7];
+\end{lstlisting}
+
+operand 폭은 9 bit로 작지만 다섯 항의 mode selection과 addition이 한 cycle에
+모였다. 최종판은 C2에 $c_qT\bmod512$만 등록하고, 등록된 $T[15:7]$은 다음
+DSP-input cycle에서 더한다.
+
+\begin{lstlisting}
+// C2 register
+corr9_c2 <= op0 + op1 + op2 + op3;
+t_c2     <= T;
+
+// following DSP-input cycle
+u_hi = t_c2[15:7] + corr9_c2;
+u    = {u_hi, t_c2[6:0]};
+\end{lstlisting}
+
+DSP1이 ML-DSA와 Montgomery mode에서 서로 다른 cycle 역할을 갖는다는 schedule을
+이용했으므로 six-cycle latency와 \ii=1을 유지했다. pipeline 최적화는 연산을
+기계적으로 반으로 자르는 일이 아니라, 다음 hard block이 operand를 받는
+시점까지 포함해 cut 위치를 정하는 일이다.
+
+\section{실패 4: 상수곱에 stage 하나를 더 넣자 기능이 깨졌다}
+
+NTRU+의 고정 상수곱은 처음에 shifted partial product 일곱 개와
+$q=4096-639$를 이용한 여러 fold를 두 cycle에 배치했다. adder tree를
+balanced form으로 다시 써도 product와 modular fold의 carry depth 자체는
+남았다. 이후 작은 input field를 table로 바꾸어 carry chain을 table output의
+합과 한 번의 correction으로 줄였다. 최종 $1006x\bmod3457$ 회로는
+6-bit field 두 개의 table과 12-bit modular addition을 사용한다.
+
+더 높은 주파수 실험에서는 이 상수곱을 세 stage로 늘려 보았다. 개별 block의
+조합 depth는 줄지만 radix-3/삼항식 branch는 상수곱 결과와 별도의 difference
+rail이 같은 cycle에 도착한다고 가정했다. 상수곱만 한 cycle 늦어지자 NTRU+
+INTT 결과가 어긋났다.
+
+선택지는 두 가지였다.
+
+\begin{enumerate}
+  \item 관련된 모든 branch와 metadata를 한 cycle 더 지연한다.
+  \item 두-cycle 계약을 유지하고 연산 표현을 바꾼다.
+\end{enumerate}
+
+첫 선택은 공통 alignment FF와 전체 latency를 늘린다. 최종판은 두 번째를
+택했다. raw subtraction의 underflow correction을 table 앞 12-bit adder로
+수행하지 않고, underflow일 때 더해야 하는 상수 효과
+$-1006\times639\equiv168\pmod{3457}$를 table 선택에 미리 반영했다.
+그 결과 correction carry chain 하나를 table data selection으로 바꾸면서
+두-cycle arrival contract를 보존했다.
+
+이 실패는 “register를 넣으면 timing은 좋아진다”는 문장이 불완전함을
+보여 준다. multi-branch pipeline에서는 값, valid, mode, destination tag와
+parallel operand가 같은 transaction으로 다시 만나는 cycle까지 함께 바뀐다.
+
+\section{실패 5: 연산기를 최대한 공유했더니 더 커졌다}
+
+한 실험판은 네 개의 runtime-generic folded ALU에 23-bit와 12-bit 연산을 모두
+모으고, raw/correction two-pass register와 공통 delay rail을 두었다. 연산기
+개수만 세면 매력적이지만 실제 FPGA 비용은 다음 위치로 이동했다.
+
+\begin{itemize}
+  \item generic ALU 앞의 wide operand crossbar
+  \item carry chain 뒤의 mode-dependent result MUX
+  \item 여러 stage와 mode로 퍼지는 select fanout
+  \item latency가 다른 branch를 끝까지 끌고 가는 alignment FF
+\end{itemize}
+
+NTRU+ lazy reduction도 다섯 internal correction을 제거하는 대신 intermediate가
+13--14 bit로 넓어졌다. multiplier와 constant-multiplier 입력이 커지고 output
+canonicalization이 다시 필요했다. 최종 output에서 제거했던 adder/MUX가
+돌아오므로 해당 branch의 순 area 이득이 사실상 사라졌다.
+
+최종 구조는 큰 자원과 시점이 정확히 맞는 연산을 공유한다. 두 DSP, DSP
+register, final correction addition은 공유한다. NTRU+의 cycle-local add/sub는
+12 bit로 남긴다. 이 경험에서 나온 기준은 다음과 같다.
+
+\begin{tradeoffbox}[공유 여부를 결정하는 기준]
+연산기 개수만 비교하지 않는다. 공유 전후의 operand MUX 폭, result MUX 위치,
+mode fanout, alignment register와 placement 거리까지 합쳐서 비교한다.
+\end{tradeoffbox}
+
+\section{implementation directive만으로 150 MHz가 되지 않았다}
+
+중간 RTL을 Zynq-7020에 standalone OOC로 구현했을 때 default flow의
+150~MHz WNS는 $-0.374$~ns였다. synthesis retiming과 timing-oriented
+place/route directive를 적용하면 $-0.152$~ns까지 회복했지만 여전히
+timing은 닫히지 않았다. 같은 flow에서 140~MHz는 $+0.026$~ns였다.
+
+이 수치는 directive가 쓸모없다는 뜻이 아니다. RTL의 register, MUX, fanout
+구조를 고친 뒤 implementation flow가 나머지 placement/routing margin을
+회복한다. 최종 150~MHz 결과는 두 작업을 함께 적용한 결과다.
+
+300~MHz 실험에서는 3.333~ns constraint에서 synthesis WNS $-7.170$~ns와
+RAMB36E1 pulse-width slack $-0.551$~ns가 관찰되었다. 이 implementation
+point는 route를 진행하지 않았다. pulse-width violation은 조합 path에 register를
+더 넣는 것으로 해결되지 않기 때문이다. 목표 주파수를 올리는 실험도
+\textbf{RTL로 고칠 path}, \textbf{clock/device primitive 제한},
+\textbf{기능 정렬 비용}을 구분해 중단 기준을 세워야 한다.
+
+\begin{checklistbox}
+\begin{itemize}
+  \item 실패한 run도 requirement, WNS, source, destination, logic levels,
+        logic/route 비율을 남긴다.
+  \item 한 cycle 식에서 carry chain이 몇 번 이어지는지 회로로 다시 그린다.
+  \item 빈 alignment stage를 먼저 찾고 새 stage 추가는 그다음에 검토한다.
+  \item 한 branch의 latency를 바꾸면 parallel data와 metadata의 합류 cycle을
+        testbench에서 확인한다.
+  \item 공유 실험은 ALU 수뿐 아니라 MUX, fanout, FF와 route까지 비교한다.
+  \item directive로 얻은 margin과 RTL 구조 변경의 효과를 같은 것으로 쓰지 않는다.
+\end{itemize}
+\end{checklistbox}

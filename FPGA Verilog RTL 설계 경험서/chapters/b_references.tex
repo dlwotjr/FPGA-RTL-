@@ -1,0 +1,56 @@
+\chapter{자료와 재현 근거}
+
+\section{AMD/Xilinx 문서}
+
+\begin{itemize}
+  \item \href{https://docs.amd.com/r/en-US/ug901-vivado-synthesis}{UG901, Vivado Design Suite User Guide: Synthesis}: RAM/DSP/SRL coding과 synthesis option
+  \item \href{https://docs.amd.com/r/en-US/ug949-vivado-design-methodology}{UG949, UltraFast Design Methodology Guide}: timing path 분석, pipelining, fanout, control set, inference
+  \item \href{https://docs.amd.com/r/en-US/ug906-vivado-design-analysis}{UG906, Vivado Design Suite User Guide: Design Analysis and Closure Techniques}: timing/utilization report 해석
+  \item \href{https://docs.amd.com/v/u/en-US/ug479_7Series_DSP48E1}{UG479, 7 Series DSP48E1 Slice User Guide}: DSP48E1 data path와 internal register
+  \item \href{https://docs.amd.com/v/u/en-US/ug473_7Series_Memory_Resources}{UG473, 7 Series FPGAs Memory Resources}: RAMB36E1/RAMB18E1 구성
+  \item \href{https://docs.amd.com/r/en-US/ug474_7Series_CLB}{UG474, 7 Series FPGAs Configurable Logic Block User Guide}: LUT, FF, carry, slice 구조
+\end{itemize}
+
+\section{사례 RTL 파일}
+
+\begin{longtable}{L{58mm}L{104mm}}
+\toprule
+파일 & 이 책에서 확인한 내용 \\
+\midrule
+\rtlfile{MDL\_XXX\_ntt\_core.v} & BRAM command, physical tag, occupancy, butterfly/writeback alignment \\
+\rtlfile{MDL\_XXX\_layout\_mapper.v} & side/compact-row bijection과 고정 affine tap \\
+\rtlfile{MDL\_XXX\_bram\_dp.v} & true-dual-port synchronous BRAM inference template \\
+\rtlfile{MDL\_XXX\_zeta\_rom.v} & packed 2048$\times$32 two-read-port twiddle memory \\
+\rtlfile{MDL\_XXX\_XXX\_unifiedMUL.v} & two-DSP, six-stage ML-DSA/R16 shared multiplier \\
+\rtlfile{MDL\_XXX\_unifiedBUT.v} & two multiplier instance와 unified butterfly pipeline \\
+\rtlfile{MDL\_XXX\_ntt\_addrgen.v} & logical address schedule와 NTRU+864 special mode \\
+\rtlfile{MDL\_XXX\_ntt\_engine.v} & transport-independent core boundary \\
+\rtlfile{MDL\_XXX\_axis\_load.v} & 64-bit beat의 2/4-coefficient write \\
+\rtlfile{MDL\_XXX\_axis\_dump.v} & finite FIFO credit와 AXI backpressure \\
+\bottomrule
+\end{longtable}
+
+\section{측정 report}
+
+수치는 companion project에 보존된 다음 report를 source of truth로 삼았다.
+
+\begin{itemize}
+  \item 최초 100~MHz OOC: \rtlfile{reports/vivado\_impl\_baseline}
+  \item 200~MHz 목표판: \rtlfile{reports/vivado\_200mhz}와
+        \rtlfile{doc/200mhz\_result.md}
+  \item 최종 세 범위: \rtlfile{reports/memory\_conflict\_mc/axis},
+        \rtlfile{bram}, \rtlfile{mdl\_only}
+  \item 최종 board 측정:
+        \rtlfile{board\_benchmark\_150mhz\_final\_20260903.md/csv}
+\end{itemize}
+
+표를 다른 문서로 옮길 때는 report path, Vivado version, device, clock constraint,
+top-level을 함께 옮긴다. 숫자만 복사하면 이후의 설계 변경과 비교 범위를 추적할
+수 없다.
+
+\section{개정 원칙}
+
+이 개정판은 기존의 ``개념--쉬운 예--주의할 예--더 좋은 예--area--timing'' 반복
+구조를 제거했다. 공통 기초는 1장과 2장에 한 번만 설명하고, 이후 내용은 실제
+RTL의 문제 경로와 변경 근거에 연결했다. 일반 규칙은 해당 사례에서 확인된
+범위 안에서만 결론으로 제시한다.

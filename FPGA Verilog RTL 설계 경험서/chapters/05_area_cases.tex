@@ -1,0 +1,170 @@
+\chapter{Area와 inference 실제 사례}
+
+\section{사례 1: BRAM inference가 먼저다}
+
+초기 synthesis는 true-dual-port memory의 두 write port를 합성기가 인식하는
+형태로 표현하지 못해 RAM을 register로 풀었다. 네 bank hierarchy가 각각 약
+27--29k LUT와 47,150 FF를 사용했고, 전체는 device 용량을 훨씬 초과했다.
+이때의 우선순위는 address 폭 축소나 mux 미세 최적화가 아니라 inference
+template 수정이다.
+
+최종 \rtlfile{MDL\_XXX\_bram\_dp.v}는 port별 synchronous process를 분리한다.
+
+\begin{lstlisting}
+(* ram_style = "block" *) reg [DATA_W-1:0] mem [0:DEPTH-1];
+
+always @(posedge iSYS_CLK) begin : PORT_A
+  if (iENA) begin
+    if (iWEA) mem[iADDRA] <= iDINA;
+    oDOUTA <= mem[iADDRA];
+  end
+end
+
+always @(posedge iSYS_CLK) begin : PORT_B
+  if (iENB) begin
+    if (iWEB) mem[iADDRB] <= iDINB;
+    oDOUTB <= mem[iADDRB];
+  end
+end
+\end{lstlisting}
+
+\rtlfile{ram\_style} attribute만 붙이는 것으로 부족하다. port semantics가
+primitive가 지원하는 동작과 맞아야 한다. read-first 동작과 same-row dual write가
+없다는 scheduler 계약도 simulation assertion으로 남긴다.
+
+\section{사례 2: logical depth와 physical depth를 분리한다}
+
+최초 coefficient bank parameter는 11-bit address, depth 2048이었다. 최대 transform
+길이는 1152이지만 네 physical bank가 각각 logical address 전체를 받을 수 있게
+작성되어 있었다. 2048$\times$23 true-dual-port bank 하나는 7-series에서
+RAMB36과 RAMB18의 조합으로 구현되었고, 네 bank가 6 BRAM-tile equivalents를
+소비했다.
+
+최종 mapping은 logical address $x$를 side와 row로 나눈다.
+\[
+row=x[10:1],\qquad side=x_0\oplus x_k.
+\]
+지원 transform에서 최대 row는 575이므로 각 bank는 576$\times$23이면 충분하다.
+이 크기는 RAMB36E1 하나에 들어가며 네 coefficient bank는 총 4 RAMB36이 된다.
+
+\subsection{왜 정보가 사라지지 않는가}
+
+$row$에는 $x_k$가 남아 있다($k\ge1$). 그러므로
+\[
+x_0=side\oplus x_k
+\]
+로 제거한 bit 0을 복원할 수 있다. 즉 $(side,row)$는 logical address와 일대일
+대응한다. 단순히 address LSB를 버린 것이 아니라, 그 정보를 side에 보존한
+compact mapping이다.
+
+\begin{lstlisting}
+assign oSIDE       = addr[0] ^ addr[k];
+assign oLOCAL_ADDR = addr[ADDR_W-1:1];
+\end{lstlisting}
+
+실제 RTL은 variable $k$ 대신 4, 6, 7의 고정 tap을 case로 선택한다. mapping별
+bijection, row bound, radix-2 bank balance를 exhaustive test로 확인한다.
+
+\section{사례 3: scheme별 ROM을 word packing으로 통합한다}
+
+최초 \rtlfile{zeta\_rom}은 ML-KEM, ML-DSA, HAETAE, NTRU+768,
+NTRU+864/1152 ROM을 모두 instantiate한 뒤 mode mux로 출력을 선택했다. 합성
+결과의 twiddle storage는 RAMB18 세 개, 즉 1.5 tile이었다.
+
+최종판은 2048$\times$32의 packed image 하나를 두 synchronous read port로
+읽는다. 저장 구간은 다음과 같다.
+
+\begin{longtable}{L{37mm}r r L{78mm}}
+\toprule
+Mode & Base word & Words & Packing \\
+\midrule
+ML-DSA & 0 & 256 & 23-bit value 1개/word \\
+HAETAE & 256 & 128 & 16-bit value 2개/word \\
+ML-KEM & 384 & 64 & 12-bit value 2개/word \\
+NTRU+768 & 448 & 96 & 12-bit value 2개/word \\
+NTRU+864/1152 & 544 & 144 & 12-bit value 2개/word \\
+Falcon forward & 688 & 512 & 16-bit value 2개/word \\
+Falcon inverse & 1200 & 512 & 16-bit value 2개/word \\
+\bottomrule
+\end{longtable}
+
+총 1712 word이므로 2048-word memory에 들어간다. narrow mode의 logical address
+LSB가 word 안의 low/high slot을 고른다.
+
+\begin{lstlisting}
+phys_w = base_w + logical_addr[10:1];
+slot_w = logical_addr[0];
+
+out = slot_q ? word_q[31:16] : word_q[15:0];
+\end{lstlisting}
+
+packed ROM은 두 RAMB36을 사용한다. twiddle memory만 보면 1.5 tile에서 2 tile로
+0.5 tile 증가했지만, Falcon forward/inverse table까지 포함한다. coefficient
+bank가 6 tile에서 4 tile로 줄어 전체 accelerator memory는 7.5 tile에서 6
+tile로 1.5 tile 감소했다. 부분별 증감을 나눠 보아야 올바른 설명이 된다.
+
+\section{사례 4: pipeline metadata도 area다}
+
+data path만 세면 control storage를 놓치기 쉽다. 최초 core는 네 lane의
+\rtlfile{va/vb/vc/vd}를 각각 12-stage pipeline으로 운반했고, BRAM read 뒤에
+data/address/zeta를 다시 capture하는 register group도 있었다.
+
+최종 transaction에서는 A/B/C lane이 항상 유효하고 radix-3일 때만 D가 없다.
+따라서 tail valid는 layer-static butterfly mode로 계산한다.
+
+\begin{lstlisting}
+wire ctl_is_r3 = (ctl_but_sel_q == BUT_R3_NTT) ||
+                 (ctl_but_sel_q == BUT_R3_INTT);
+wire wb_lane_d_valid = !ctl_is_r3;
+\end{lstlisting}
+
+최종 13-stage 기준으로 네 lane-valid shift register 52 FF를 제거한다. 이 숫자는
+해당 register의 구조적 감소량이며, 전체 FF delta와 동일시하지 않는다. 다른
+pipeline과 interface register도 동시에 바뀌었기 때문이다.
+
+read data와 synchronous zeta output은 butterfly C1 register로 직접 들어가도록
+정렬하여 duplicate capture stage도 제거했다. pipeline register를 무조건 줄인
+것이 아니라, 같은 cycle boundary가 두 번 존재하는 부분을 찾은 것이다.
+
+\section{사례 5: 계측 logic을 production에서 생성하지 않는다}
+
+LOAD/CORE/DUMP/TOTAL cycle counter는 개발 중 유용하지만 accelerator protocol의
+필수 기능은 아니다. 최종 top은 parameterized generate로 네 32-bit counter와
+incrementer를 production configuration에서 제거한다.
+
+\begin{lstlisting}
+generate
+  if (ENABLE_PERF_COUNTERS != 0) begin : GEN_PERF_COUNTERS
+    // four 32-bit cycle counters
+  end else begin : GEN_NO_PERF_COUNTERS
+    always @(posedge iSYS_CLK) begin
+      oLOAD_CYCLES  <= 0;
+      oCORE_CYCLES  <= 0;
+      oDUMP_CYCLES  <= 0;
+      oTOTAL_CYCLES <= 0;
+    end
+  end
+endgenerate
+\end{lstlisting}
+
+하위 AXI load/dump beat counter도 같은 parameter를 사용한다. 검증용 관측성을
+유지하면서 release hardware에 incrementer와 fanout을 남기지 않는 방법이다.
+
+\section{Area 감소를 설명하는 올바른 문장}
+
+최초 standalone과 최종 standalone의 역사적 결과는 LUT 5,278에서 4,736,
+FF 3,072에서 2,792, BRAM tile 7.5에서 6.0, DSP 4에서 4다. 각각 10.3\%,
+9.1\%, 20.0\% 감소와 DSP 동일이다. 그러나 package, top boundary, clock가
+완전히 일치하는 단일 변수 실험은 아니다.
+
+따라서 다음과 같이 쓴다.
+
+\begin{goodbox}[권장 해석]
+최종 implementation point는 최초 standalone archive보다 542 LUT, 280 FF,
+1.5 BRAM tile을 적게 사용하고 같은 네 DSP를 사용한다. compact coefficient
+mapping은 bank당 RAMB18을 제거했고, 다른 LUT/FF 변화에는 arithmetic,
+scheduler, metadata, wrapper 차이가 함께 포함된다.
+\end{goodbox}
+
+특정 RTL 변경 하나가 전체 542 LUT를 줄였다고 쓰려면 그 변경만 다른 matched
+run이 추가로 필요하다.

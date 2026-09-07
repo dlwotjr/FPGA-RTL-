@@ -1,94 +1,109 @@
-# FPGA/Verilog RTL 설계 교과서
+# FPGA/Verilog RTL 설계 경험서
 
-Xilinx FPGA 환경을 기준으로, Verilog RTL이 실제 하드웨어 자원으로 어떻게 합성되고 배치되는지를 구조적으로 설명하는 설계 교재입니다.  
-단순 문법 설명이 아니라, **RTL 코드가 LUT, FF, carry chain, DSP, BRAM, LUTRAM, SRL 등으로 어떻게 대응되는지**, 그리고 그 선택이 **area, timing, fanout, routing, verification**에 어떤 영향을 주는지를 설계 관점에서 정리했습니다.
+실제 Unified NTT 가속기가 100 MHz baseline에서 150 MHz 구현으로 발전한 과정을
+중심으로, FPGA RTL의 area와 timing을 함께 설명하는 경험서입니다.
 
-## 목적
+특히 실패한 timing run도 설계 기록으로 남겼습니다. 23-bit subtraction과
+conditional correction이 한 cycle에 이어진 경로, ML-DSA product 결합 뒤의
+12-CARRY4 경로, Montgomery 다중 operand addition, NTRU+ 상수곱의 pipeline
+misalignment를 실제 수치와 함께 설명합니다.
 
-이 문서는 다음과 같은 질문에 답할 수 있도록 구성했습니다.
+기존 판의 반복적인 `개념 → 쉬운 예 → 주의할 예 → 좋은 예 → area → timing`
+구성을 정리하고, 다음과 같은 실제 RTL 사례를 `관찰 → 원인 → 구조 변경 → 검증
+계약 → 측정 결과` 순서로 다시 구성했습니다.
 
-- 어떤 Verilog 코드가 어떤 FPGA 자원으로 내려가는가
-- 같은 기능이라도 왜 어떤 코드는 더 무겁고, 어떤 코드는 더 빠른가
-- area와 timing을 함께 보려면 RTL을 어떤 기준으로 작성해야 하는가
-- 단순히 동작하는 코드가 아니라, 합성과 구현 결과까지 고려한 RTL은 어떻게 달라지는가
+- DUMP 주소에서 BRAM까지 이어진 8-LUT, 9.077 ns critical path
+- DUMP 경로 수정 뒤 드러난 LOAD의 8-LUT, fanout-95 routing 병목
+- LOAD/DUMP가 공유하는 registered physical-memory command
+- pipeline valid reduction tree를 대체한 occupancy counter
+- 2048×23에서 576×23으로 줄인 compact coefficient bank
+- scheme별 twiddle ROM을 통합한 packed 2048×32 dual-read ROM
+- ML-DSA와 R16 Montgomery multiplication이 공유하는 2-DSP, 6-stage multiplier
+- 실제 단일 합성으로 확인한 add/sub/MUX/comparator/shift의 LUT와 CARRY4 비용
+- 최초/최종 standalone의 자원별 area--time product 비교
+- writeback physical tag와 불필요한 lane-valid/capture register 제거
+- AXI backpressure를 처리하는 finite-FIFO credit reservation
+- standalone RTL과 두 complete PS–PL system의 area/timing 범위 분리
 
-## 구성 방식
+## 문서
 
-이 교재는 문법 중심 설명보다는 **구조와 판단 기준** 중심으로 전개됩니다.
+- [경험서 PDF](<FPGA Verilog RTL 설계 경험서/fpga_verilog_rtl_experience_guide.pdf>)
+- [메인 TeX](<FPGA Verilog RTL 설계 경험서/fpga_verilog_rtl_experience_guide.tex>)
+- [장별 TeX source](<FPGA Verilog RTL 설계 경험서/chapters>)
+- [Unified NTT 사례 요약](UNIFIED_NTT_CASE_STUDY.md)
 
-- FPGA 자원 관점에서 RTL 해석
-- 좋은 코드와 주의할 코드를 비교
-- area, timing, routing, fanout 관점에서 trade-off 설명
-- inference와 mapping이 어떻게 달라지는지 설명
-- verification 시 주의할 점까지 함께 정리
+## 목차
 
-즉, “이 문법은 이렇게 쓴다”보다는  
-“이렇게 쓰면 왜 이런 하드웨어가 만들어지고, 언제 불리해지는가”를 기준으로 설명합니다.
+1. RTL을 회로로 읽는 기준
+2. 측정 범위와 보고서 읽기
+3. 사례 설계의 계층과 발전 과정
+4. Timing closure 실제 사례
+5. 150 MHz에 연산을 담기까지
+6. Area와 inference 실제 사례
+7. Verilog 연산자의 실제 자원 비용
+8. 공유 산술기와 pipeline 설계
+9. Scheduler, memory mapping, interface
+10. 최적화를 깨지 않게 검증하는 방법
+11. 반복 가능한 최적화 workflow
+12. 측정 결과와 설계 결론
 
-## 다루는 내용
+## PDF 빌드
 
-- LUT, FF, slice의 기본 구조
-- carry chain과 adder/subtractor 구조
-- comparator, mux, reduction logic
-- shift register와 SRL inference
-- BRAM, LUTRAM, distributed memory inference
-- DSP48 활용과 산술 연산 mapping
-- fanout, packing, placement, routing의 영향
-- area와 timing을 함께 보는 RTL 설계 기준
-- verification 관점에서 자주 놓치는 부분
+필요 도구: `latexmk`, `pdflatex`, `kotex`, `tikz`, `tcolorbox`, `listings`.
 
-## 읽는 흐름
+```sh
+make pdf
+```
 
-문서는 대체로 다음 흐름으로 읽히도록 구성했습니다.
+직접 실행하려면:
 
-1. **FPGA 기본 자원 이해**  
-   RTL이 최종적으로 어떤 물리 자원으로 구현되는지 먼저 설명합니다.
+```sh
+cd "FPGA Verilog RTL 설계 경험서"
+latexmk -pdf -interaction=nonstopmode -halt-on-error fpga_verilog_rtl_experience_guide.tex
+```
 
-2. **RTL과 합성 결과의 연결**  
-   특정 코드 패턴이 어떤 구조로 합성되는지 설명합니다.
+생성된 PDF는 TeX source와 같은 디렉터리에 저장됩니다.
 
-3. **설계 패턴 비교**  
-   같은 기능을 수행하는 여러 RTL 스타일을 비교하고, 각각의 장단점을 분석합니다.
+## 사례 RTL과 regression
 
-4. **area/timing trade-off 해석**  
-   단순히 resource 수치만 보는 것이 아니라, timing과 routing까지 포함해 해석합니다.
+경험서는 companion project의 세 RTL snapshot을 비교합니다.
 
-5. **실전 설계 판단 기준 정리**  
-   실제 RTL 작성 시 어떤 선택을 해야 하는지 체크리스트 형태로 정리합니다.
+- `old/rtl_verilog`: 최초 100 MHz RTL
+- `rtl_verilog_200mhz`: 200 MHz 목표 timing 실험판
+- `rtl_verilog_mc`: 최종 MC V5 RTL
 
-## 이런 분들에게 적합합니다
+Companion AXI4-Stream project에서 최종 regression은 다음 한 줄로 실행합니다.
 
-- FPGA에서 Verilog RTL 설계를 시작했지만, 합성 결과 해석이 어려운 분
-- 코드는 작성할 수 있지만 area/timing 최적화 기준이 정리되지 않은 분
-- Xilinx FPGA에서 inference와 자원 mapping을 구조적으로 이해하고 싶은 분
-- 단순 예제가 아니라 실전 RTL 관점의 설명이 필요한 분
+```sh
+./tool_sim/run_all.sh
+```
 
-## 특징
+보존된 100 MHz baseline regression은 다음과 같습니다.
 
-- Xilinx FPGA 기준 설명
-- 구조 중심, 설계 판단 중심 서술
-- area와 timing을 함께 보는 관점 강조
-- 좋은 코드 / 주의할 코드 / 더 나은 코드의 비교 포함
-- verification까지 고려한 설명
+```sh
+./old/tool_sim/run_all.sh
+```
 
-## 문서 활용 방법
+## 대표 측정 결과
 
-처음부터 순서대로 읽어도 되고,  
-필요한 주제만 골라서 참고서처럼 사용해도 됩니다.
+최종 세 범위는 Vivado 2020.2, `xc7z020clg484-1`, 6.666 ns constraint의
+post-route 결과입니다.
 
-특히 아래와 같은 상황에서 바로 참고할 수 있습니다.
+| Scope | LUT | FF | BRAM tile | DSP48E1 | WNS |
+|---|---:|---:|---:|---:|---:|
+| Complete AXI4-Stream + DMA + Zynq | 9,014 | 8,764 | 9.0 | 4 | +0.075 ns |
+| Complete packed AXI BRAM Controller + Zynq | 8,908 | 6,825 | 6.0 | 4 | +0.006 ns |
+| Standalone `MDL` RTL | 4,736 | 2,792 | 6.0 | 4 | +0.089 ns |
 
-- adder나 comparator가 너무 커졌을 때
-- BRAM inference가 기대대로 되지 않을 때
-- fanout이나 routing 때문에 timing이 깨질 때
-- shift register가 FF로만 구현될 때
-- 같은 기능인데 area 차이가 크게 나는 이유를 확인하고 싶을 때
+Stream system의 추가 3 BRAM-tile equivalents는 AXI DMA의 MM2S/S2MM payload
+FIFO에 속합니다. NTT arithmetic 또는 coefficient/twiddle storage 증가로
+해석하지 않습니다.
 
-## 키워드
+100 MHz 최초 standalone과 150 MHz 최종 standalone의 역사적 비교에서
+LUT--time product는 radix-2 계열 40.6\%, NTRU+ 계열 46.9--48.7\%
+감소했습니다. LUT, FF, BRAM은 서로 다른 FPGA 자원이므로 하나의 임의 면적값으로
+합치지 않고 자원별 ATP를 따로 보고합니다.
 
-`FPGA` `Verilog` `RTL` `Xilinx` `LUT` `FF` `DSP48` `BRAM` `LUTRAM` `SRL` `timing` `area` `inference` `placement` `routing` `verification`
+## Author
 
-## 참고
-
-이 문서는 FPGA RTL 설계를 “문법”보다 “구조”로 이해하기 위한 교재를 목표로 합니다.  
-따라서 각 장에서는 코드 자체보다도, **그 코드가 어떤 하드웨어를 만들고 어떤 비용을 유발하는지**를 우선해서 설명합니다.
+JaeSeok Lee, Kookmin University

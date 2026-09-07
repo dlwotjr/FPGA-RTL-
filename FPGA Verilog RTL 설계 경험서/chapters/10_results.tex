@@ -1,0 +1,146 @@
+\chapter{측정 결과와 설계 결론}
+
+\section{최종 세 범위의 post-route 결과}
+
+모든 최종 결과는 Vivado 2020.2, \rtlfile{xc7z020clg484-1}, 6.666~ns
+constraint를 사용한다. post-route utilization을 primary area result로 사용한다.
+
+\begin{longtable}{L{50mm}r r r r r r r}
+\toprule
+Scope & LUT & FF & R36 & R18 & Tile & DSP & WNS \\
+\midrule
+AXI4-Stream + DMA + Zynq & 9,014 & 8,764 & 8 & 2 & 9.0 & 4 & +0.075 \\
+Packed AXI BRAM Controller + Zynq & 8,908 & 6,825 & 6 & 0 & 6.0 & 4 & +0.006 \\
+Standalone \rtlfile{MDL} OOC & 4,736 & 2,792 & 6 & 0 & 6.0 & 4 & +0.089 \\
+\bottomrule
+\end{longtable}
+
+WNS 단위는 ns다. 세 구현 모두 setup/hold failing endpoint가 0이다. standalone
+WNS는 internal synchronous path를 나타내며 placed interface endpoint가 있는
+complete-system timing을 대신하지 않는다.
+
+\section{재현을 위한 post-synthesis 결과}
+
+\begin{longtable}{L{58mm}r r r r r}
+\toprule
+Scope & LUT & FF & R36 & R18 & DSP \\
+\midrule
+AXI4-Stream + DMA + Zynq & 9,415 & 9,055 & 8 & 2 & 4 \\
+Packed AXI BRAM Controller + Zynq & 9,399 & 7,695 & 6 & 0 & 4 \\
+Standalone \rtlfile{MDL} OOC & 4,762 & 2,792 & 6 & 0 & 4 \\
+\bottomrule
+\end{longtable}
+
+합성 후와 배치배선 후 LUT 수가 다른 것은 physical optimization과 packing의
+영향이다. 보고서 단계가 없는 숫자 하나만 남기면 나중에 차이를 재현하기 어렵다.
+
+\section{100~MHz baseline과의 역사적 변화}
+
+\begin{longtable}{L{47mm}L{29mm}r r r r r}
+\toprule
+Version/scope & Device & MHz & LUT & FF & BRAM tile & DSP \\
+\midrule
+최초 \rtlfile{ntt\_top} OOC & clg400-1 & 100 & 5,278 & 3,072 & 7.5 & 4 \\
+최종 \rtlfile{MDL} OOC & clg484-1 & 150 & 4,736 & 2,792 & 6.0 & 4 \\
+최초 complete stream system & clg484-1 & 100 & 9,108 & 7,844 & 16.5 & 4 \\
+최종 complete stream system & clg484-1 & 150 & 9,014 & 8,764 & 9.0 & 4 \\
+\bottomrule
+\end{longtable}
+
+Standalone 역사적 delta는 LUT 10.3\%, FF 9.1\%, BRAM tile 20.0\% 감소이고 DSP는
+같다. 그러나 top-level이 최초 \rtlfile{MDL\_XXX\_ntt\_top}, 최종
+\rtlfile{MDL}이며 package와 clock constraint도 다르다. 따라서 이 수치는 개발
+결과의 변화량이지 matched-device one-variable experiment가 아니다.
+
+Complete stream system에서는 LUT가 1.0\% 줄고 FF가 11.7\% 늘며 BRAM tile이
+45.5\% 줄었다. FF 증가는 final interface/timing configuration을 포함한다.
+BRAM 감소도 core memory organization과 generated IP configuration이 함께 들어간
+결과이므로 전부 arithmetic core에 귀속하지 않는다.
+
+\section{자원별 area--time product}
+
+FPGA에서는 LUT, FF, BRAM과 DSP가 서로 대체 가능한 동일 면적 단위가 아니다.
+따라서 임의의 가중치로 하나의 ATP를 만들지 않고 다음 세 값을 따로 계산한다.
+\[
+\mathrm{ATP}_{LUT}=N_{LUT}\,T,\qquad
+\mathrm{ATP}_{FF}=N_{FF}\,T,\qquad
+\mathrm{ATP}_{BRAM}=N_{tile}\,T.
+\]
+여기서 $T=C_{core}/f_{clk}$이며 interface transfer를 제외한 core cycle과
+standalone resource count를 사용한다.
+
+\begin{longtable}{L{32mm}r r r r}
+\toprule
+Configuration & Core time 감소 & LUT--time 감소 & FF--time 감소 & BRAM--time 감소 \\
+\midrule
+ML-KEM-256 & 33.8\% & 40.6\% & 39.8\% & 47.0\% \\
+ML-DSA-256 & 33.8\% & 40.6\% & 39.8\% & 47.0\% \\
+HAETAE-256 & 33.8\% & 40.6\% & 39.8\% & 47.0\% \\
+NTRU+768 & 41.0\% & 47.0\% & 46.4\% & 52.8\% \\
+NTRU+864 & 42.8\% & 48.7\% & 48.0\% & 54.3\% \\
+NTRU+1152 & 40.8\% & 46.9\% & 46.2\% & 52.6\% \\
+\bottomrule
+\end{longtable}
+
+예를 들어 ML-KEM은 557 cycle/100~MHz의 5.570~us에서
+553 cycle/150~MHz의 3.687~us로 줄었다. 여기에 LUT 감소
+$4736/5278$을 함께 곱하면
+\[
+1-\frac{4736\times3.687}{5278\times5.570}=40.6\%
+\]
+의 LUT--time product 감소가 된다. NTRU+는 clock 상승에 scheduler cycle
+감소까지 더해져 ATP 감소가 더 크다. DSP는 네 개로 동일하므로 DSP--time
+product의 감소율은 각 mode의 core-time 감소율과 같다.
+
+이 역시 package, clock와 여러 RTL 변경이 함께 다른 역사적 비교다. ATP 표는
+최초부터 최종까지의 전체 발전을 요약하며, 특정 adder나 memory mapping 하나의
+독립 효과를 나타내지 않는다. complete interface ATP를 주장하려면 두 system의
+동일 범위 end-to-end time과 complete-system resource를 별도로 사용해야 한다.
+
+\section{최종 end-to-end board latency}
+
+아래 시간은 accelerator configuration/start, cache handling, PS--PL input/output,
+completion polling, output availability를 포함한 1,000회 평균이다. Cortex-A9
+counter는 666,666,687~Hz, PL은 150~MHz다.
+
+\begin{longtable}{L{30mm}r r r r}
+\toprule
+Scheme & Stream NTT & Stream INTT & BRAM NTT & BRAM INTT \\
+\midrule
+ML-DSA & 11.932 us & 11.932 us & 34.055 us & 34.052 us \\
+ML-KEM & 9.713 us & 9.715 us & 21.232 us & 21.230 us \\
+HAETAE & 10.126 us & 10.127 us & 21.772 us & 21.772 us \\
+NTRU+768 & 19.832 us & 19.834 us & 54.587 us & 54.587 us \\
+NTRU+864 & 22.066 us & 22.070 us & 61.057 us & 61.055 us \\
+NTRU+1152 & 27.832 us & 27.832 us & 79.955 us & 79.952 us \\
+\bottomrule
+\end{longtable}
+
+Falcon modular NTT/INTT mode는 RTL simulation으로 검증했으며 이 board benchmark에는
+포함되지 않았다. 개별 transform의 BRAM path가 stream보다 느리다는 결과를 area와
+바꾸어 말하면 안 된다. interface/data movement의 latency와 resource trade-off를
+그대로 제시한다.
+
+\section{무엇이 실제로 개선을 만들었는가}
+
+\begin{enumerate}
+  \item \textbf{측정 가능성}: inference 실패를 PPA baseline에서 제외하고 정상
+        BRAM mapping부터 확보했다.
+  \item \textbf{memory 경계}: logical mapping과 phase mux를 registered physical
+        command/tag로 바꾸어 RAM pin 앞 critical path를 끊었다.
+  \item \textbf{저장 밀도}: bijective side/row mapping으로 coefficient bank depth를
+        실제 최대치 576으로 줄였다.
+  \item \textbf{공유}: 두 DSP와 stage register를 ML-DSA/R16 path가 공유하고,
+        마지막 correction addition도 공유했다.
+  \item \textbf{불변조건 활용}: 고정 port pattern, lane validity, exact beat size,
+        fixed mode를 이용해 runtime compare/control을 줄였다.
+  \item \textbf{처리율 보존}: 더 긴 pipeline에서도 \ii=1을 유지하고 scheduler의
+        빈 cycle을 줄였다.
+  \item \textbf{범위 분리}: standalone core와 두 complete PS--PL system을 따로
+        보고해 interface cost를 arithmetic cost로 오해하지 않게 했다.
+\end{enumerate}
+
+가장 일반적인 결론은 ``pipeline을 많이 넣는다''가 아니다. report가 지목한
+경로에 transaction boundary를 만들고, 그 경계를 따라 data와 metadata를 함께
+옮기며, 실제 address range와 mode 불변조건으로 storage/control을 줄이는 것이
+이 사례의 설계 방법이다.

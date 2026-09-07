@@ -1,0 +1,199 @@
+\chapter{Timing closure 실제 사례}
+
+\section{사례 1: DUMP address에서 BRAM까지}
+
+100~MHz standalone baseline의 최악 setup path는 다음 경계였다.
+
+\begin{lstlisting}[numbers=none]
+u_dump/oDBG_RD1_ADDR_reg[2]
+  -> u_core/u_bram3/.../ADDRARDADDR[6]
+\end{lstlisting}
+
+\begin{longtable}{L{38mm}rL{76mm}}
+\toprule
+항목 & 값 & 해석 \\
+\midrule
+Requirement & 10.000 ns & 100~MHz clock \\
+Data path delay & 9.077 ns & setup 여유가 매우 작음 \\
+Logic delay & 1.681 ns & 전체의 18.5\% \\
+Route delay & 7.396 ns & 전체의 81.5\% \\
+Logic levels & 8 & LUT2/3/4/5와 LUT6 네 개 \\
+Post-route WNS & +0.273 ns & 100~MHz는 충족 \\
+\bottomrule
+\end{longtable}
+
+주소는 layout side와 bank를 계산하고, LOAD/DUMP/CORE가 공유하는 BRAM port mux를
+통과했다. logical address, bank selection, phase selection이 RAM address pin 앞
+한 cycle에 모인 구조다. 200~MHz의 5~ns budget에는 맞지 않는다.
+
+\subsection{첫 대응: address와 selection tag를 같이 등록한다}
+
+중간 200~MHz 목표판은 DUMP address를 두 번 등록하고, bank/port tag도 BRAM
+응답 cycle에 맞춰 등록했다. 핵심은 데이터만 늦추는 것이 아니라 \textbf{그
+데이터를 선택할 metadata도 같이 늦추는 것}이다.
+
+\begin{lstlisting}
+dbg_addr_q  <= iDBG_RD_ADDR;
+dbg_addr_q2 <= dbg_addr_q;
+dbg_bank_q  <= dbg_bank;
+dbg_bank_q2 <= dbg_bank_q;
+
+case (dbg_bank_q)
+  2'd0: begin bram0_ena = 1'b1; bram0_addra = dbg_addr_q2; end
+  2'd1: begin bram1_ena = 1'b1; bram1_addra = dbg_addr_q2; end
+  // ...
+endcase
+\end{lstlisting}
+
+BRAM은 주소를 받은 다음 cycle에 동기식 read data를 내므로, output mux의 bank
+tag는 address command보다 한 단계 뒤에 있어야 한다. 이 변경 때문에 AXI dump
+valid pipeline도 3-stage에서 4-stage로 늘려 response data와 valid/TLAST를 다시
+맞췄다.
+
+\begin{warningbox}[pipeline 삽입의 실제 비용]
+주소 register 하나를 넣는 변경은 주소만의 변경이 아니다. bank, port, valid,
+last, FIFO reservation과 phase done 시점까지 같은 transaction을 가리키는지
+확인해야 한다. 기능 simulation이 필요한 이유가 바로 이 cycle contract다.
+\end{warningbox}
+
+\section{사례 2: DUMP를 고치자 LOAD가 병목이 되었다}
+
+DUMP 경로를 약 1~ns 수준으로 줄인 뒤, 200~MHz 목표판의 최악 경로는 LOAD
+address에서 BRAM write-address pin으로 이동했다.
+
+\begin{longtable}{L{41mm}rL{73mm}}
+\toprule
+항목 & 값 & 해석 \\
+\midrule
+Data path delay & 7.913 ns & 5~ns budget 초과 \\
+Logic delay & 1.448 ns & 18\% 수준 \\
+Route delay & 6.465 ns & 81\%, placement/routing 지배 \\
+Logic levels & 8 LUT & bank/port/phase address mux \\
+문제 net fanout & 95 & 넓은 memory control 분배 \\
+Post-route WNS & $-3.563$ ns & 200~MHz 미충족 \\
+\bottomrule
+\end{longtable}
+
+이 결과에서 얻을 교훈은 ``register를 더 넣자''보다 구체적이다. LOAD와 DUMP가
+각자 mapper, bank rail, port rail을 만들고 마지막에 phase mux로 합쳐지면 RAM
+주변에 넓은 조합 cone과 high-fanout net이 생긴다. 따라서 최종판은 host
+transaction을 physical command로 먼저 바꾼 후 하나의 register bank에 저장했다.
+
+\section{최종 구조: 공유되는 registered host command}
+
+최종 \rtlfile{MDL\_XXX\_ntt\_core.v}의 핵심 register는 다음과 같다.
+
+\begin{lstlisting}
+reg        host_write_q;
+reg [3:0]  host_valid_q;
+reg [3:0]  host_side_q;
+reg        host_set_q;
+reg [LOCAL_ADDR_W-1:0] host_row0_q, host_row1_q,
+                       host_row2_q, host_row3_q;
+reg [D-1:0] host_data0_q, host_data1_q,
+            host_data2_q, host_data3_q;
+\end{lstlisting}
+
+LOAD와 DUMP는 동시에 발생하지 않는 phase다. mapper 출력인 side와 compact row를
+이 register에 저장하고, BRAM port mux는 등록된 physical command만 본다. 이
+경계는 세 가지를 동시에 해결한다.
+
+\begin{enumerate}
+  \item logical-to-physical mapping을 BRAM pin 앞 경로에서 분리한다.
+  \item LOAD/DUMP가 각각 소유하던 physical command rail을 공유한다.
+  \item phase control의 큰 fanout을 register boundary에서 제한한다.
+\end{enumerate}
+
+4개씩 정렬된 host transaction에서 port pattern은 지원 mapping 모두 A,A,B,B로
+고정된다. 따라서 세 lane의 port 선택은 state register가 아니라 상수 wire가 된다.
+
+\begin{lstlisting}
+wire host_port1_q = 1'b0;
+wire host_port2_q = 1'b1;
+wire host_port3_q = 1'b1;
+\end{lstlisting}
+
+동작 범위에서 항상 참인 불변조건을 찾아 runtime control을 없앤 사례다. 이
+불변조건은 layout-mapper regression으로 모든 address에 대해 확인한다.
+
+\section{control reduction tree를 memory path에서 제거한다}
+
+최초 core는 pipeline이 비었는지 다음처럼 계산했다.
+
+\begin{lstlisting}
+wire pipe_nonempty = |valid_pipe;
+assign oBUSY = iSTART | ag_running | req_valid_q |
+               rd_valid_q | cap_valid_q | pipe_nonempty;
+wire load_req = iLOAD_WE && !oBUSY;
+\end{lstlisting}
+
+긴 valid vector의 reduction OR가 \rtlfile{oBUSY}와 LOAD guard를 거쳐 BRAM address
+mux까지 영향을 주었다. 중간판과 최종판은 입출 수를 세는 작은 occupancy
+counter를 사용한다.
+
+\begin{lstlisting}
+reg [3:0] pipe_cnt;
+wire pipe_nonempty = (pipe_cnt != 4'd0) | rd_valid_q;
+
+if (but_enable) begin
+  case ({rd_valid_q, wb_valid_int})
+    2'b10: pipe_cnt <= pipe_cnt + 4'd1;
+    2'b01: pipe_cnt <= pipe_cnt - 4'd1;
+  endcase
+end
+\end{lstlisting}
+
+counter는 FF와 작은 adder를 추가한다. 대신 wide reduction tree가 매 cycle의
+memory control을 구동하지 않게 한다. timing을 위해 약간의 local state를 쓰는
+trade-off다.
+
+최종 LOAD path에서는 \rtlfile{!oBUSY} 조건도 제거했다. top-level phase FSM이
+LOAD와 CORE를 상호 배타적으로 보장하므로 core 내부에서 같은 조건을 다시
+계산할 필요가 없다. 이 제거는 안전성 전제를 hierarchy 계약으로 올린 것이다.
+따라서 top-level FSM과 host write assertion을 함께 검증해야 한다.
+
+\section{writeback mapping을 한 cycle 앞당긴 physical tag}
+
+최초판은 logical address를 pipeline 끝까지 운반한 뒤 writeback 시점에 layout과
+bank를 다시 계산했다. 최종판은 read request에서 \{side,row\} tag를 만들고
+result와 같은 길이로 이동시킨다.
+
+\begin{lstlisting}
+req_tag_a_q <= {rd_side_a, rd_row_a};
+// ... synchronous BRAM read and butterfly pipeline ...
+wb_side_a_pre = a_pipe[PIPE_STAGES-2][ADDR_W-1];
+wb_row_a_pre  = a_pipe[PIPE_STAGES-2][LOCAL_ADDR_W-1:0];
+\end{lstlisting}
+
+ping-pong set bit만 반전하면 최종 physical bank가 결정되므로 writeback pin 앞에
+parity/affine mapping logic을 다시 둘 필요가 없다. ``계산 결과''뿐 아니라
+``어디에 쓸 결과인가''도 pipeline data로 취급한 설계다.
+
+\section{병목이 이동했는지 확인한다}
+
+최종 150~MHz 결과에서 최악 경로는 더 이상 DUMP/LOAD address에서 BRAM pin으로
+가는 경로가 아니다.
+
+\begin{longtable}{L{42mm}L{49mm}rL{47mm}}
+\toprule
+범위 & 최악 경로 종류 & Data delay & WNS \\
+\midrule
+Standalone \rtlfile{MDL} & butterfly mode에서 modular add register & 6.522 ns & +0.089 ns \\
+Complete AXI4-Stream & address-generator state에서 request tag & 6.366 ns & +0.075 ns \\
+Complete BRAM controller & butterfly input에서 constant-multiply register & 6.550 ns & +0.006 ns \\
+\bottomrule
+\end{longtable}
+
+이 표는 모든 경로가 넉넉하다는 뜻이 아니다. BRAM complete system은 6.666~ns
+constraint에 0.006~ns만 남는다. 다만 처음의 memory-address 구조가 제거되어
+다음 optimization 대상이 scheduler와 arithmetic 내부로 이동했음을 보여 준다.
+
+\begin{checklistbox}
+\begin{itemize}
+  \item pipeline을 넣기 전 source/destination과 route 비율을 기록한다.
+  \item address와 data를 선택하는 tag/valid/last를 같은 transaction으로 이동한다.
+  \item 수정 후 이전 경로가 아니라 새 top-$N$ 경로를 다시 읽는다.
+  \item high-fanout constraint를 넣기 전에 구조적으로 load 수를 줄일 수 있는지 본다.
+  \item positive WNS뿐 아니라 zero failing endpoint와 hold도 확인한다.
+\end{itemize}
+\end{checklistbox}

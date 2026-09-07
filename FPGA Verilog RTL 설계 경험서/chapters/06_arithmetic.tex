@@ -1,0 +1,166 @@
+\chapter{공유 산술기와 pipeline 설계}
+
+\section{설계 목표를 연산식과 자원으로 동시에 적는다}
+
+최종 \rtlfile{unifiedMUL}의 목표는 두 종류의 modular multiplication을 같은
+두 DSP48E1과 arithmetic/register path에서 실행하는 것이다.
+
+\begin{itemize}
+  \item ML-DSA: $q=8{,}380{,}417$, 23-bit operand path
+  \item Narrow primes: R16 Montgomery multiplication, $R=2^{16}$
+  \item Narrow modulus: ML-KEM 3,329, HAETAE 64,513, NTRU+ 3,457,
+        Falcon 12,289
+  \item Latency: six pipeline stages
+  \item Throughput: mode가 유지되는 동안 매 cycle 새 입력 수락, \ii=1
+\end{itemize}
+
+하나의 \rtlfile{unifiedBUT}은 \rtlfile{unifiedMUL} 두 개를 사용하므로 전체
+butterfly arithmetic은 DSP48E1 네 개를 사용한다.
+
+\section{DSP0: 공통 low product}
+
+두 path 모두 먼저 $A$와 $B$의 low 16-bit product를 필요로 한다.
+
+\begin{lstlisting}
+(* use_dsp = "yes" *) wire [38:0] c1_mul_lo_w;
+assign c1_mul_lo_w = iA[22:0] * iB[15:0];
+
+always @(posedge iSYS_CLK)
+  if (iFSM_START) c1_mul_lo_r <= c1_mul_lo_w;
+\end{lstlisting}
+
+ML-DSA에서는 23-bit $B$를 low 16-bit와 high 7-bit로 분할한다.
+\[
+A B=A B_{lo}+2^{16}A B_{hi}.
+\]
+DSP0의 low product와 DSP1의 high partial product를 정렬해 더한다. Narrow-prime
+mode에서는 DSP0 output의 low 32 bit가 $T=A B$다.
+
+\section{Narrow-prime path: R16 Montgomery multiplication}
+
+Narrow mode는 다음 연산을 수행한다.
+\[
+T=A B,\qquad
+u=Tq^{-1}\bmod 2^{16},\qquad
+t=\frac{T-uq}{2^{16}}.
+\]
+$t<0$이면 $q$를 한 번 더해 canonical result를 만든다. 네 modulus는 모두
+$q\equiv1\pmod{2^7}$을 만족하므로
+\[
+q^{-1}=1+2^7c_q\pmod{2^{16}}
+\]
+로 쓸 수 있다. 따라서 $u$의 low 7 bit는 $T$의 low 7 bit와 같고, high 9 bit는
+선택된 shift와 9-bit addition으로 계산할 수 있다.
+
+실제 RTL은 mode별로 필요한 shifted value를 고른 뒤 하나의 9-bit 합에 넣는다.
+
+\begin{lstlisting}
+case (mode)
+  CTL_KYBER: begin op0 = -m3; op1 = m5; op2 = m6; end
+  CTL_HAETAE:begin op0 =  m4;                    end
+  CTL_NTRU:  begin op0 =  m2; op1 = m3;
+                    op2 =  m5; op3 = m7;          end
+  CTL_FALCON:begin op0 = -m2; op1 = -m3;          end
+endcase
+corr9 = op0 + op1 + op2 + op3;
+\end{lstlisting}
+
+여기서 $m_2,\ldots,m_7$은 $T$의 일부 bit를 고정 shift한 9-bit 값이다. 9-bit
+wraparound가 modulo 512 연산을 제공한다. 네 modulus마다 넓은 constant multiplier를
+병렬로 만든 뒤 고르는 구조를 피하고, mode select와 작은 addition을 공유한다.
+
+\section{DSP1: mode별 곱과 정렬 산술 공유}
+
+두 번째 DSP는 mode에 따라 다른 역할을 한다.
+
+\begin{longtable}{L{29mm}L{57mm}L{75mm}}
+\toprule
+Mode & DSP1 multiplication & DSP ALU/PREG 동작 \\
+\midrule
+ML-DSA & $A\times B_{hi}$ & DSP0 low product의 정렬된 high 부분과 덧셈 \\
+Narrow prime & $u\times q$ & 정렬된 $T$에서 $u q$를 뺌 \\
+\bottomrule
+\end{longtable}
+
+최종 synthesis branch는 DSP48E1의 MREG, ALU, PREG를 사용한다. ML-DSA와
+Montgomery path의 fabric mux를 multiplier 바로 앞에 깊게 두지 않고 DSP의
+A/D/C 입력과 ALUMODE/INMODE로 역할을 바꾼다. simulation branch는 같은 latency의
+behavioral multiplication과 register를 사용하므로, 두 branch가 bit-accurate하고
+cycle-accurate한지 regression에서 함께 확인해야 한다.
+
+\section{공유 register는 live bit를 기준으로 설계한다}
+
+각 stage의 payload 폭은 두 mode의 필요한 정보를 담을 만큼만 잡는다.
+
+\begin{longtable}{C{15mm}L{52mm}L{94mm}}
+\toprule
+Stage & ML-DSA에서 보존할 값 & Narrow mode에서 보존할 값 \\
+\midrule
+C1 & 23$\times$16 low product & $T=A B$ \\
+C2 & low product 일부 & $T$와 $c_qT\bmod512$ \\
+C3 & quotient 준비용 high/low 조각 & DSP1 subtraction용 정렬된 $T$ \\
+C4 & residual과 borrow 정보 & $T-uq$는 DSP1 PREG에 유지 \\
+C5 & base-minus-borrow 결과 & negative result에 조건부 $+q$ \\
+C6 & ML-DSA canonical correction & C5 narrow result 출력 \\
+\bottomrule
+\end{longtable}
+
+두 mode가 같은 cycle에 동시에 실행되지 않으므로 payload의 live range가 겹치지
+않는 bit는 공유할 수 있다. 다만 mode mux가 wide payload 전체에 생기지 않도록
+양쪽에서 실제로 소비되는 low part만 선택하고, 한 mode에서 의미 없는 upper
+part는 다른 mode 값을 그대로 연결한다.
+
+\section{최종 correction addition 공유}
+
+C5에서는 ML-DSA의 base-minus-borrow와 narrow Montgomery result의 조건부 $+q$를
+하나의 signed 18-bit adder로 표현한다.
+
+\begin{lstlisting}
+shared_a = is_dili ? sign_extend(dili_base)
+                   : sign_extend(mont_quotient);
+shared_b = is_dili ? -borrow
+                   : (mont_negative ? mont_q : 0);
+shared_sum = shared_a + shared_b;
+\end{lstlisting}
+
+공유 가능성은 ``둘 다 덧셈처럼 보인다''에서 나오지 않는다. 두 연산이 같은
+pipeline stage에 있고, mode가 transaction 동안 고정되고, 필요한 signed range가
+18 bit 안에 들어간다는 세 조건에서 나온다.
+
+\section{ML-DSA path의 폭을 줄이는 방법}
+
+ML-DSA modulus는
+\[
+2^{23}\equiv 2^{13}-1\pmod q
+\]
+관계를 갖는다. 최종 RTL은 23-bit operand split으로 얻은 product 조각을 13-bit
+radix 위치에 맞춰 재배열하고, 필요한 low subtraction과 high signed addition을
+나눠 계산한다. 이는 알려진 modulus relation을 shared datapath에 맞게 배치한
+것이며 새로운 reduction algorithm을 주장하는 근거가 아니다.
+
+중요한 RTL 습관은 중간값의 증명된 범위를 사용해 폭을 정하고 assertion으로
+남기는 것이다. 예를 들어 signed high base와 final canonical range가 예상 범위를
+벗어나면 simulation에서 즉시 error를 발생시킨다. 이런 assertion은 합성에서
+제거되므로 production area에는 포함되지 않는다.
+
+\section{산술 timing의 현재 위치}
+
+최종 standalone 150~MHz 최악 경로는 mode register에서 butterfly modular-add
+register까지이며, 7 logic levels와 6.522~ns data delay를 보였다. complete BRAM
+system 최악 경로도 butterfly input에서 constant-multiply register까지 10 logic
+levels, 6.550~ns다. memory-address path가 정리된 뒤 arithmetic이 다시 timing
+closure의 중심이 된 것이다.
+
+다음 개선을 시도한다면 mode fanout, constant-add partition, stage boundary를
+matched OOC run으로 비교해야 한다. 단순히 DSP를 더 쓰거나 pipeline latency를
+늘리기 전에 \ii=1, 네-DSP limit, layer cycle 계약을 함께 보존해야 한다.
+
+\begin{checklistbox}
+\begin{itemize}
+  \item mode별 수식을 먼저 쓰고 같은 cycle의 공통 연산을 찾는다.
+  \item operand와 중간값의 signed range를 증명해 register 폭을 정한다.
+  \item DSP 내부 MREG/PREG와 fabric register의 경계를 따로 센다.
+  \item mode mux가 DSP/carry 앞 critical path에 붙는지 report로 확인한다.
+  \item latency와 initiation interval을 별도 지표로 검증한다.
+\end{itemize}
+\end{checklistbox}

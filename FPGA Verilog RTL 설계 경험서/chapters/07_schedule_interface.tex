@@ -1,0 +1,127 @@
+\chapter{Scheduler, memory mapping, interface}
+
+\section{연산량보다 빈 cycle을 먼저 센다}
+
+같은 butterfly 수라도 layer 시작, BRAM read, pipeline fill/drain, 다음 layer
+descriptor 준비 때문에 cycle 수가 달라진다. 최종 radix-2 schedule의 관측식은
+다음처럼 정리된다.
+\[
+C_{core}=L\,(N_{issue/layer}+15).
+\]
+ML-KEM은 7개 layer와 layer당 64 issue로 $7(64+15)=553$ cycle,
+ML-DSA/HAETAE는 8개 layer로 $8(64+15)=632$ cycle이다. 이 식의 15는 단일
+butterfly latency만 뜻하지 않는다. address issue부터 final writeback과 layer
+전환까지의 관측 overhead다.
+
+최종 FSM은 다음 layer descriptor를 미리 계산하고, 마지막 writeback edge의
+lookahead로 다음 layer를 시작한다. address generator도 first transaction seed를
+descriptor에 포함해 layer 시작 뒤의 별도 준비 cycle을 줄인다.
+
+\section{NTRU+864의 half-empty issue 제거}
+
+NTRU+864의 특수 step-3 구간을 일반 schedule로 표현하면 일부 transaction에서
+lane을 충분히 사용하지 못한다. 최종 \rtlfile{ntt\_addrgen}은
+\rtlfile{ADDR\_MODE\_N864\_STEP3}를 별도로 두어 유효 coefficient 조합을 직접
+발행한다. 이는 memory layout 자체를 바꾸는 mode가 아니다. logical address
+schedule만 바꾸고 affine mapping은 유지한다.
+
+이 구분 덕분에 scheduler test는 issue address/valid를 검사하고, mapper test는
+bijection/bank conflict를 독립적으로 검사할 수 있다. schedule과 physical layout을
+한 always block에 섞으면 어느 쪽의 오류인지 분리하기 어렵다.
+
+\section{Core-cycle 결과}
+
+\begin{longtable}{L{31mm}r r r r}
+\toprule
+Configuration & 최초 cycle & 최종 cycle & Cycle 감소 & 100/150 MHz 시간 감소 \\
+\midrule
+ML-KEM-256 & 557 & 553 & 0.7\% & 33.8\% \\
+ML-DSA-256 & 636 & 632 & 0.6\% & 33.8\% \\
+HAETAE-256 & 636 & 632 & 0.6\% & 33.8\% \\
+NTRU+768 & 1,709 & 1,513 & 11.5\% & 41.0\% \\
+NTRU+864 & 2,053 & 1,761 & 14.2\% & 42.8\% \\
+NTRU+1152 & 2,605 & 2,313 & 11.2\% & 40.8\% \\
+\bottomrule
+\end{longtable}
+
+마지막 열은 최초 100~MHz와 최종 150~MHz implementation point를 사용한 core-only
+시간이다. radix-2-only mode는 cycle 감소가 작고 주파수 상승 효과가 중심이다.
+Mixed-radix NTRU+는 scheduler cycle 감소가 추가로 기여한다.
+
+\section{AXI LOAD: beat 안의 병렬성을 memory lane으로 전달한다}
+
+64-bit AXI input 한 beat는 ML-DSA에서 32-bit coefficient 두 개, narrow mode에서
+16-bit coefficient 네 개를 담는다. 최종 loader는 accepted beat마다 최대 네
+logical write를 같은 cycle에 만든다.
+
+\begin{lstlisting}
+oLOAD_WE  <= 1'b1;  oLOAD_ADDR  <= coeff_q;
+oLOAD1_WE <= 1'b1;  oLOAD1_ADDR <= coeff_q + 1;
+oLOAD2_WE <= !mldsa;oLOAD2_ADDR <= coeff_q + 2;
+oLOAD3_WE <= !mldsa;oLOAD3_ADDR <= coeff_q + 3;
+\end{lstlisting}
+
+지원하는 모든 $N$이 packing factor로 정확히 나누어지므로 각 lane의 upper-bound
+comparator를 반복할 필요가 없다. 한 번의 \rtlfile{all\_issued/final\_accept}
+판정으로 충분하다. 불변조건을 이용해 세 개의 11-bit 비교기를 제거한 사례다.
+
+\rtlfile{oWS\_TREADY}는 receive state에서 항상 1이고 내부 bubble을 삽입하지
+않는다. 따라서 source가 TVALID를 연속으로 주면 매 cycle 한 beat를 받는다.
+
+\section{AXI DUMP: backpressure보다 먼저 reservation한다}
+
+BRAM request는 발행 후 취소할 수 없다. downstream \rtlfile{TREADY}가 내려간
+뒤 FIFO가 꽉 차면 이미 날아오는 response를 버리게 된다. 최종 dump는 현재
+FIFO count만 보지 않고, 아직 도착하지 않은 request까지 slot을 예약한다.
+
+\begin{lstlisting}
+wire pop       = (count_q != 0) && iWM_TREADY;
+wire can_issue = (credit_q != 0) || pop;
+wire issue     = active_q && !all_issued && can_issue;
+
+case ({issue,pop})
+  2'b10: credit_q <= credit_q - 1'b1;
+  2'b01: credit_q <= credit_q + 1'b1;
+endcase
+\end{lstlisting}
+
+같은 cycle에 pop이 있으면 그 slot을 새 request에 즉시 재사용한다. 정상
+\rtlfile{TREADY=1} 상태에서 refill bubble 없이 \ii=1을 유지하면서, 임의의
+backpressure에서는 overflow를 막는다. FIFO payload는 reset하지 않는다.
+\rtlfile{count\_q=0}이 모든 오래된 entry를 invalid로 만들기 때문에 payload reset을
+없애 LUTRAM inference와 packing을 돕는다.
+
+\section{Interface 두 개를 비교하는 법}
+
+AXI4-Stream과 AXI BRAM Controller는 같은 engine을 사용하지만 PS--PL data movement가
+다르다. 따라서 비교에는 두 층이 있다.
+
+\begin{itemize}
+  \item \textbf{Core-only}: 같은 engine의 cycle와 standalone area
+  \item \textbf{End-to-end}: configuration, cache handling, DMA/MMIO transfer,
+        polling, output availability를 포함한 board 시간
+\end{itemize}
+
+최종 complete-system에서 stream 쪽은 AXI DMA MM2S/S2MM payload FIFO를 포함한다.
+MM2S FIFO는 68 bit, S2MM FIFO는 72 bit라서 각각 RAMB36 하나와 남은 2 bit용
+RAMB18 하나를 사용한다. 따라서 accelerator의 6 RAMB36에
+\[
+2\times\mathrm{RAMB36}+2\times0.5\,\mathrm{RAMB18}=3\ \text{tiles}
+\]
+가 더해져 9 tile이 된다. 이것은 AXI4-Stream protocol 자체나 NTT arithmetic의
+비용이 아니라 해당 DMA FIFO configuration의 data-movement 비용이다.
+
+AXI BRAM Controller configuration은 이 payload FIFO 없이 coefficient memory에
+접근하며, 현재 post-route 결과에서 controller 자체는 BRAM을 사용하지 않는다.
+complete system의 area 차이를 core arithmetic 개선으로 해석하면 안 된다.
+
+\begin{checklistbox}
+\begin{itemize}
+  \item layer당 issue, fill, drain, transition cycle을 분리해 센다.
+  \item logical schedule와 physical mapping을 독립 module/test로 둔다.
+  \item ready/valid throughput과 total latency를 별도로 측정한다.
+  \item in-flight response까지 FIFO credit에 포함한다.
+  \item interface 비교는 같은 device, clock, tool, implementation directive로 한다.
+\end{itemize}
+\end{checklistbox}
+

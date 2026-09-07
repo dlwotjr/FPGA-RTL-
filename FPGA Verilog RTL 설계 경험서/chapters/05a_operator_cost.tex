@@ -1,0 +1,198 @@
+\chapter{Verilog 연산자의 실제 자원 비용}
+
+\section{연산자 하나를 같은 조건에서 합성해 본다}
+
+Verilog의 짧은 기호와 FPGA primitive 수는 일대일로 대응하지 않는다. 이를
+확인하기 위해 23-bit datapath에서 자주 쓰는 연산을
+\rtlfile{operator\_cost\_all} top 하나에 각각 독립 instance로 배치하고 한 번의
+OOC synthesis를 수행했다.
+
+\begin{itemize}
+  \item Vivado 2020.2, \rtlfile{xc7z020clg484-1}
+  \item \rtlfile{flatten\_hierarchy none}
+  \item 각 instance의 input/output 사이에 한 register boundary
+  \item instance 사이의 흡수와 제거를 막기 위한 hierarchy 보존
+  \item place/route 이전의 post-synthesis primitive count
+\end{itemize}
+
+\begin{longtable}{L{41mm}r r r r L{46mm}}
+\toprule
+RTL 연산 & LUT & CARRY4 & FF & DSP & 해석 \\
+\midrule
+23-bit \rtlfile{a+b} & 23 & 6 & 69 & 0 & 한 carry chain \\
+23-bit \rtlfile{a-b} & 23 & 6 & 69 & 0 & 한 carry chain \\
+23-bit \rtlfile{a==b} & 8 & 2 & 47 & 0 & bit 비교와 reduction \\
+23-bit unsigned \rtlfile{a<b} & 24 & 3 & 47 & 0 & magnitude compare \\
+\rtlfile{a>=8380417} & 6 & 0 & 24 & 0 & constant bit pattern으로 축소 \\
+23-bit 2:1 MUX & 23 & 0 & 70 & 0 & output bit당 LUT 하나 \\
+23-bit 4:1 MUX & 23 & 0 & 117 & 0 & 4 data+2 select가 LUT6에 들어감 \\
+23-bit constant left shift & 0 & 0 & 41 & 0 & 배선과 constant bit \\
+23-bit variable left shift & 64 & 0 & 51 & 0 & multi-level barrel MUX \\
+23$\times$16 multiply & 0 & 0 & 39 & 1 & DSP48E1로 흡수 \\
+23-bit modular subtraction & 46 & 12 & 92 & 0 & subtract와 conditional add \\
+13-input reduction OR & 3 & 0 & 14 & 0 & 작은 reduction tree \\
+\bottomrule
+\end{longtable}
+
+FF 수에는 연산기 자체뿐 아니라 실험 조건을 고정한 input/output boundary
+register가 포함된다. 예를 들어 23-bit add의 69 FF는 두 23-bit input register와
+23-bit output register다. 그러므로 표의 FF 열을 순수 operator cost로 읽지
+않는다. 반면 LUT, CARRY4와 DSP 열은 각 독립 instance의 조합 구조를 직접
+보여 준다.
+
+\section{Addition과 subtraction: LUT가 carry를 구동한다}
+
+7-series의 CARRY4 하나는 네 bit의 carry propagation을 담당한다. 이 실험에서
+23-bit addition과 subtraction은 각각
+\[
+\left\lceil\frac{23}{4}\right\rceil=6
+\]
+개의 CARRY4와 23 LUT를 사용했다. LUT는 각 bit의 propagate/generate 또는
+sum 선택을 만들고, CARRY4가 인접 bit의 carry를 빠르게 전달한다.
+
+이 결과가 “23-bit adder는 항상 23 LUT”라는 법칙은 아니다. constant operand,
+사용되지 않는 상위 carry, 주변 MUX와 downstream logic이 있으면 합성기가
+LUT를 합치거나 제거한다. 그러나 RTL을 처음 검토할 때
+\textbf{23-bit carry 연산 하나는 대략 여섯 CARRY4 길이}라고 보는 것은 유용하다.
+
+\subsection{왜 modular subtraction이 무거운가}
+
+한 cycle modular subtraction의 실험 코드는 raw difference와 conditional
+addition을 연속으로 둔다.
+
+\begin{lstlisting}
+diff      = {1'b0,a} - {1'b0,b};
+corrected = {1'b0,diff[22:0]} + {1'b0,q};
+result    = diff[23] ? corrected[22:0] : diff[22:0];
+\end{lstlisting}
+
+합성 결과는 46 LUT와 12 CARRY4였다. 일반 subtract의 정확히 두 배인 carry
+resource가 한 register 경계에 놓인 셈이다. 150~MHz 실패 path에서 관찰한
+11 CARRY4도 이 구조와 같은 직관을 준다. 최종 RTL이 early difference를
+raw subtract와 conditional correction의 두 cycle로 나눈 이유를 area와
+timing 양쪽에서 설명할 수 있다.
+
+\section{Comparator: 같은 23 bit라도 비용이 다르다}
+
+\rtlfile{==}는 bit별 equality와 reduction으로 구현할 수 있다. 이 실험의
+23-bit equality는 8 LUT와 2 CARRY4였다. unsigned magnitude compare는
+bit의 우선순위를 판단해야 하므로 24 LUT와 3 CARRY4를 사용했다.
+
+constant compare는 더 작아질 수 있다. ML-DSA modulus
+8,380,417과의 23-bit \rtlfile{>=} 비교는 6 LUT, CARRY4 0개로 줄었다.
+constant의 0/1 pattern과 reachable range를 합성기가 이용했기 때문이다.
+
+따라서 다음 두 RTL은 폭이 같아도 같은 면적으로 예상하지 않는다.
+
+\begin{lstlisting}
+wire ge_runtime = (value >= runtime_q);
+wire ge_mldsa   = (value >= 23'd8380417);
+\end{lstlisting}
+
+현재 NTT RTL이 외부의 unconstrained \rtlfile{PRM\_Q}를 넓은 arithmetic cone에
+계속 전달하지 않고 scheme별 internal constant를 선택하는 이유도 여기에 있다.
+constant propagation은 comparator뿐 아니라 adder의 고정 bit와 MUX input도
+줄일 수 있다.
+
+\section{MUX: input 개수와 bit 폭을 함께 센다}
+
+23-bit 2:1 MUX와 4:1 MUX는 이 isolated synthesis에서 모두 23 LUT였다.
+한 output bit를 기준으로 2:1 MUX는 두 data와 select의 3-input function이고,
+4:1 MUX는 네 data와 두 select의 6-input function이다. 둘 다 LUT6 하나에
+들어간다.
+
+이 결과에서 4:1 MUX가 항상 2:1과 같은 timing이라는 결론은 나오지 않는다.
+LUT input pin delay, select fanout와 placement가 다르다. 8:1 이상이 되거나
+MUX 앞뒤에 arithmetic이 붙으면 LUT level 또는 dedicated MUX resource가
+더 필요할 수 있다.
+
+특히 다음 두 표현은 기능이 같아 보여도 합성 문맥이 다르다.
+
+\begin{lstlisting}
+// Multiple arithmetic branches may become parallel operators plus a result MUX.
+y = mode0 ? add_mod(a,b) :
+    mode1 ? add_mod(c,d) : add_mod(e,f);
+
+// Select operands first, then use one physical arithmetic position.
+case (mode)
+  0: begin op_a=a; op_b=b; end
+  1: begin op_a=c; op_b=d; end
+  default: begin op_a=e; op_b=f; end
+endcase
+y = add_mod(op_a,op_b);
+\end{lstlisting}
+
+최종 butterfly는 두 번째 구조를 사용한다. mode branch마다 function을 호출해
+여러 adder와 result MUX를 만들지 않고, physical position의 operand를 먼저
+선택한 뒤 arithmetic function을 한 번 호출한다.
+
+\section{Shift: constant와 variable은 전혀 다른 회로다}
+
+같은 \rtlfile{<<} 연산자라도 shift amount가 compile-time constant인지
+runtime signal인지가 중요하다. 23-bit \rtlfile{a<<5}는 LUT를 하나도 쓰지
+않았다. bit 위치를 바꾸는 배선과 0 constant로 충분하기 때문이다.
+
+반면 5-bit runtime shift amount를 사용한 23-bit left shift는 64 LUT였다.
+여러 shift 후보를 단계별로 고르는 barrel MUX가 필요하다. NTT address와
+modular arithmetic에서 고정 shift를 적극적으로 사용하는 이유는 곱셈을
+덧셈으로 바꾸는 것뿐 아니라 variable barrel network를 피하기 위해서다.
+
+\section{Multiplication과 reduction}
+
+\rtlfile{23x16} multiply에는 \rtlfile{use\_dsp}를 지정했고 결과는 LUT 0,
+DSP48E1 한 개였다. operand가 DSP48E1 multiplier port 범위에 들어가므로
+product와 output register가 hard block에 흡수된다. 최종
+\rtlfile{unifiedMUL}은 이런 DSP를 두 개 사용하고, 두 instance의 합계가
+네 DSP다.
+
+constant multiplication은 항상 DSP를 써야 하는 것은 아니다. 최종
+$1006x\bmod3457$ block은 두 6-bit table과 addition/correction으로 구현되어
+standalone post-route hierarchy에서 84 LUT와 25 FF, DSP 0개를 사용한다.
+세 lane의 modular division by 3 block은 shift와 addition으로 구현되어
+465 LUT와 216 FF, DSP 0개다. hard DSP를 네 개로 제한하는 대신 fabric
+area를 사용한 명시적인 trade-off다.
+
+13-input reduction OR는 isolated synthesis에서 3 LUT였다. 수만 보면 작지만
+그 결과가 \rtlfile{BUSY}, enable과 memory phase MUX를 동시에 구동하면
+fanout과 route가 critical path가 될 수 있다. 최종 core가
+\rtlfile{|valid\_pipe}를 occupancy counter로 바꾼 이유는 LUT 세 개 자체보다
+그 reduction 결과의 timing cone을 없애기 위해서다.
+
+\section{면적을 예상하는 순서}
+
+\begin{enumerate}
+  \item 각 cycle 경계 사이의 add/sub carry chain 수와 bit 폭을 센다.
+  \item arithmetic 앞 operand MUX와 뒤 result MUX 가운데 어느 쪽이 생기는지
+        그린다.
+  \item variable shift, runtime modulus, generic multiply처럼 작은 기호가
+        큰 network를 만드는 표현을 표시한다.
+  \item pipeline data뿐 아니라 valid, mode, address와 destination tag의
+        register bit도 센다.
+  \item memory는 선언 bit 수가 아니라 target primitive의 width/depth
+        configuration으로 올림해 센다.
+  \item 마지막에는 반드시 post-synthesis hierarchy와 primitive count로
+        예상이 맞는지 확인한다.
+\end{enumerate}
+
+이 프로젝트의 최종 standalone hierarchy에서 complete
+\rtlfile{unifiedBUT}은 2,704 LUT, 2,038 FF와 네 DSP를 사용한다.
+하위 두 \rtlfile{unifiedMUL}은 같은 RTL이지만 각각 459/378 LUT로 다르게
+보였다. downstream trimming과 hierarchy 간 LUT combining 때문이다.
+하위 block 수를 단순 합산하거나 동일 RTL의 한 instance 수치를 절대값으로
+일반화하지 않는다.
+
+\begin{checklistbox}
+\begin{itemize}
+  \item add/sub는 먼저 $\lceil W/4\rceil$ CARRY4 chain을 예상한다.
+  \item conditional correction은 두 번째 carry chain과 MUX가 붙는지 확인한다.
+  \item 4:1 bit MUX는 LUT6 하나에 들어가도 select fanout은 별도로 본다.
+  \item constant shift는 배선, variable shift는 barrel MUX로 생각한다.
+  \item multiplication은 DSP inference report와 내부 register 흡수를 확인한다.
+  \item 작은 OOC 결과와 complete-system post-route 결과를 같은 수치로 취급하지 않는다.
+\end{itemize}
+\end{checklistbox}
+
+재현용 RTL, Tcl과 실제 summary는 repository의
+\rtlfile{examples/operator\_cost}에 있다. 하나의 in-memory project에서
+synthesis를 한 번만 실행하므로 Vivado project directory나 checkpoint를
+저장소에 남기지 않는다.

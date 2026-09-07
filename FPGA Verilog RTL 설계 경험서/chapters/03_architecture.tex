@@ -1,0 +1,100 @@
+\chapter{사례 설계의 계층과 발전 과정}
+
+\section{처음부터 통합되어 있던 기능}
+
+최초 100~MHz RTL은 이미 하나의 \rtlfile{unifiedBUT}에서 다음 연산을 선택했다.
+
+\begin{itemize}
+  \item radix-2 Cooley--Tukey NTT와 Gentleman--Sande INTT
+  \item radix-3 NTT와 INTT
+  \item forward/inverse trinomial transform
+\end{itemize}
+
+따라서 발전의 핵심을 ``radix-2와 radix-3를 처음 통합했다''고 설명하면 사실과
+다르다. 실제 개선 대상은 memory organization, address/control path, multiplier
+sharing, pipeline alignment, scheduler와 transport였다. 최종판에는 Falcon
+modular NTT/INTT mode도 추가되었다.
+
+\section{100~MHz top과 최종 top의 차이}
+
+최초 top에는 AXI load, FSM, dump, core가 직접 나란히 있었다.
+
+\begin{center}
+\begin{tikzpicture}[node distance=7mm and 9mm,>=Latex,
+  box/.style={draw,rounded corners,minimum width=29mm,minimum height=9mm,align=center}]
+\node[box] (load) {axis\_load};
+\node[box,right=of load] (core) {ntt\_core\\BRAM + BFU};
+\node[box,above=of core] (fsm) {ntt\_fsm};
+\node[box,right=of core] (dump) {axis\_dump};
+\draw[->] (load)--(core);
+\draw[->] (fsm)--(core);
+\draw[->] (core)--(dump);
+\end{tikzpicture}
+\end{center}
+
+최종판은 transport-independent engine을 경계로 둔다.
+
+\begin{center}
+\begin{tikzpicture}[node distance=7mm and 9mm,>=Latex,
+  box/.style={draw,rounded corners,minimum width=27mm,minimum height=9mm,align=center},
+  group/.style={draw,dashed,rounded corners,inner sep=5mm}]
+\node[box] (load) {AXIS load};
+\node[box,right=of load] (fsm) {engine FSM};
+\node[box,right=of fsm] (core) {NTT core\\mapping/BRAM/BFU};
+\node[box,right=of core] (dump) {AXIS dump};
+\node[group,fit=(fsm)(core),label=below:{\rtlfile{MDL\_XXX\_ntt\_engine}}] (eng) {};
+\draw[->] (load)--node[above]{4-lane host write}(fsm);
+\draw[->] (fsm)--(core);
+\draw[->] (core)--node[above]{4-lane host read}(dump);
+\end{tikzpicture}
+\end{center}
+
+AXI4-Stream top과 AXI BRAM Controller frontend가 같은 engine을 사용하므로,
+interface 실험이 arithmetic schedule을 조용히 바꾸지 않는다. 이 분리는 직접적인
+LUT 감소 기법이라기보다 비교의 신뢰성과 재사용성을 높이는 architecture 결정이다.
+
+\section{최종 core의 한 transaction 흐름}
+
+\begin{enumerate}
+  \item \rtlfile{ntt\_addrgen}이 logical coefficient address와 zeta address를 만든다.
+  \item \rtlfile{layout\_mapper}가 logical address를 physical side와 compact row로 바꾼다.
+  \item 네 개의 true-dual-port coefficient BRAM에서 피연산자를 읽는다.
+  \item 두 zeta를 packed ROM에서 동기식으로 읽는다.
+  \item \rtlfile{unifiedBUT}이 선택된 radix/mode의 연산을 수행한다.
+  \item valid/last와 physical tag가 13-stage result에 맞춰 이동한다.
+  \item 반대 ping-pong set의 BRAM에 결과를 쓴다.
+\end{enumerate}
+
+이 흐름의 중요한 계약은 연산 중 mode가 고정되고, 새로운 transaction을 매 cycle
+받을 수 있다는 점이다. latency는 길어질 수 있지만 \ii=1을 유지하면 layer의
+steady-state 처리율은 유지된다.
+
+\section{세 번의 설계 시점}
+
+\begin{longtable}{L{31mm}L{44mm}L{86mm}}
+\toprule
+시점 & 관찰 & 다음 판단 \\
+\midrule
+\endhead
+100~MHz baseline & timing 충족, memory address/control route가 최악 경로 & memory pin 앞 조합 경로를 register로 분할 \\
+200~MHz 목표판 & DUMP 병목 제거 후 LOAD가 8-LUT/fanout-95 병목으로 이동, \wns $-3.563$~ns & 한 경로의 patch가 아니라 host memory command 전체를 재구성 \\
+MC V5 150~MHz & compact memory, physical tag, shared host command, packed zeta, 재구성된 multiplier & 세 interface/standalone 범위에서 timing과 area 검증 \\
+\bottomrule
+\end{longtable}
+
+이 과정은 timing closure가 ``한 번 pipeline을 넣고 끝내는 일''이 아님을 보여
+준다. 한 병목을 제거하면 다음 실제 병목이 보인다. 매 iteration에서 새 report를
+읽고, 원인 범위를 더 넓히거나 좁혀야 한다.
+
+\section{최적화 동안 보존한 불변조건}
+
+\begin{itemize}
+  \item 두 \rtlfile{unifiedMUL}은 총 네 DSP48E1을 사용한다.
+  \item mode가 고정된 동안 multiplier와 butterfly는 매 cycle 새 입력을 받는다.
+  \item ping-pong layer는 읽는 set과 쓰는 set을 분리한다.
+  \item logical coefficient 순서와 NTT/INTT 수학 결과는 유지한다.
+  \item AXI backpressure 중 전송된 beat를 잃거나 중복하지 않는다.
+\end{itemize}
+
+최적화 전에 이 불변조건을 먼저 적어 두면 ``합성은 좋아졌지만 protocol 또는
+cycle alignment가 바뀐'' 회귀를 빠르게 찾을 수 있다.

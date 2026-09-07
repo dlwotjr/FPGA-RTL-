@@ -1,0 +1,30 @@
+\chapter{용어 사전}
+
+\begin{longtable}{L{39mm}L{123mm}}
+\toprule
+용어 & 이 책에서의 의미 \\
+\midrule
+Area & LUT, FF, BRAM, DSP 등 구현 자원. 반드시 top-level 범위와 report 단계를 함께 쓴다. \\
+BRAM inference & RTL memory가 RAMB36/RAMB18 hard block으로 합성되는 과정 \\
+Canonical result & modular value가 정한 범위 $[0,q)$ 안에 있는 표현 \\
+Carry chain & FPGA slice 안에서 addition/subtraction carry를 빠르게 전달하는 전용 경로 \\
+Control set & register가 공유하는 clock, reset, enable 조합. packing에 영향을 준다. \\
+Critical path & 특정 timing check에서 slack이 가장 작은 path \\
+Data path delay & source에서 destination까지 cell logic와 routed net delay의 합 \\
+DSP48E1 & 7-series의 multiplier, pre-adder, ALU, pipeline register를 포함 hard block \\
+Fanout & 한 net이 구동하는 load 수. 높은 fanout은 넓은 routing을 요구할 수 있다. \\
+Initiation interval (II) & 연속 transaction을 받을 수 있는 최소 cycle 간격 \\
+Latency & 한 transaction의 input acceptance부터 result까지 걸리는 cycle \\
+Logical address & algorithm과 software가 보는 coefficient index \\
+Physical tag & 이 설계에서 BRAM side와 compact row를 묶은 pipeline metadata \\
+Pipeline stage & register로 나뉜 한 cycle의 조합 연산 구간 \\
+Post-route & placement와 routing을 마친 구현 단계. 최종 timing/area 판단에 사용 \\
+Post-synthesis & 논리 합성과 technology mapping 직후 단계. inference 확인에 유용 \\
+Route delay & 배치된 cell 사이의 programmable interconnect 지연 \\
+Setup slack & required time에서 arrival time을 뺀 값. 음수면 setup violation \\
+Throughput & 단위 시간에 처리하는 transaction 수. latency와 별도 지표다. \\
+TNS & 음수 setup slack의 합. violation의 전체 규모를 나타낸다. \\
+WHS & 가장 작은 hold slack \\
+WNS & 가장 작은 setup slack \\
+\bottomrule
+\end{longtable}

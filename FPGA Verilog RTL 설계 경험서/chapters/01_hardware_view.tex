@@ -1,0 +1,108 @@
+\chapter{RTL을 회로로 읽는 기준}
+
+\begin{summarybox}[이 장의 결론]
+RTL 최적화의 단위는 코드 한 줄이 아니라 \textbf{register-to-register path와 저장
+구조}다. 같은 연산자도 폭, 부호, fanout, 전후 mux, pipeline 위치에 따라 전혀
+다른 회로와 배치 결과를 만든다.
+\end{summarybox}
+
+\section{조합식보다 경로를 먼저 그린다}
+
+동기식 경로 하나의 setup 조건은 다음처럼 생각할 수 있다.
+\[
+T_{clk} \ge T_{cq}+T_{logic}+T_{route}+T_{setup}+T_{uncertainty}-T_{skew}.
+\]
+RTL에서 직접 보이는 것은 주로 $T_{logic}$의 후보뿐이다. FPGA에서는 LUT와
+hard block이 물리적으로 떨어져 있고, 한 control net이 많은 load를 구동할 수
+있으므로 $T_{route}$가 더 클 수 있다. 따라서 긴 식을 짧게 보이도록 다시 쓰는
+것만으로 timing이 해결된다고 가정하면 안 된다.
+
+이 책의 100~MHz baseline 최악 경로가 좋은 예다. 논리 지연은 1.681~ns였지만
+routing은 7.396~ns였다. 총 data path delay 9.077~ns 중 81.5\%가 배선이었다.
+이 경우의 설계 질문은 ``식을 얼마나 줄일까''보다 ``어느 register 경계에서
+주소와 bank 결정을 끊을까''가 된다.
+
+\section{FPGA 자원과 RTL의 대응}
+
+\begin{longtable}{L{27mm}L{55mm}L{78mm}}
+\toprule
+자원 & 대표 RTL & 설계자가 확인할 것 \\
+\midrule
+\endhead
+LUT6 & Boolean logic, 작은 mux, decode & 입력 수, logic level, 공유 신호의 fanout \\
+FDRE & 상태, pipeline, metadata & reset/enable, bit width, control set, 정렬 관계 \\
+CARRY4 & 덧셈, 뺄셈, 일부 비교 & carry 길이, 앞뒤 mux, signed 확장 \\
+DSP48E1 & 곱셈과 곱셈 전후 산술 & operand 폭, 내부 register, pre-adder/ALU 사용 \\
+RAMB36/18 & 동기 RAM/ROM/FIFO & depth와 width, port 동작, reset, inference template \\
+LUTRAM/SRL & 작은 RAM, FIFO, delay line & 동기/비동기 read, reset이 inference를 막는지 \\
+\bottomrule
+\end{longtable}
+
+자원 수와 속도는 독립 변수가 아니다. 예를 들어 register를 추가하면 FF는
+증가하지만 조합 경로를 끊고 placement 자유도를 높일 수 있다. 반대로 여러
+mode의 레지스터를 하나로 합치면 FF는 줄어도 입력 mux가 critical path에 붙을
+수 있다. 선택은 항상 합성 후 경로와 hierarchy utilization으로 확인한다.
+
+\section{연산자의 실제 비용}
+
+\subsection{덧셈과 뺄셈}
+
+고정 폭 덧셈은 보통 LUT와 carry chain으로 구현된다. 폭이 커질수록 carry가
+길어지고, 입력 앞의 mode mux와 출력 뒤의 correction mux가 한 cycle에 함께
+붙으면 경로가 깊어진다. 다음 두 표현은 수학적으로 간단하지만 하드웨어 질문은
+서로 다르다.
+
+\begin{lstlisting}
+sum  = a + b;
+out  = (sum >= q) ? sum - q : sum;
+\end{lstlisting}
+
+확인할 항목은 (1) $a+b$의 범위, (2) 비교가 MSB/borrow로 흡수되는지,
+(3) correction이 같은 cycle인지, (4) $q$가 상수인지다. 실제 범위가 한 번의
+보정만 요구한다면 그 사실을 RTL 폭과 assertion에 남겨야 합성기와 검증 환경이
+같은 전제를 공유한다.
+
+\subsection{mux와 variable select}
+
+여러 mode가 하나의 산술기를 공유하면 mux가 필요하다. mux를 산술기 입력에
+두면 선택 지연 뒤에 carry/DSP가 이어지고, 결과 쪽에 두면 산술기가 복제될 수
+있다. 어느 쪽이 좋은지는 ``mux는 나쁘다''로 결정할 수 없다. 공유할 hard block,
+허용 자원, critical path를 함께 본다.
+
+최종 memory mapper는 generic variable bit-select 대신 실제 지원하는 tap만
+case로 열거한다.
+
+\begin{lstlisting}
+case (iMAP_SEL)
+  MAP_AFFINE4: side_w = addr[0] ^ addr[4];
+  MAP_AFFINE6: side_w = addr[0] ^ addr[6];
+  MAP_AFFINE7: side_w = addr[0] ^ addr[7];
+  default:     side_w = ^addr;
+endcase
+\end{lstlisting}
+
+지원 공간을 정확히 표현하면 불필요한 barrel-select 구조를 피하고, 검증해야 할
+경우의 수도 명확해진다.
+
+\subsection{constant shift와 constant multiply}
+
+고정 shift는 대부분 배선이다. 여러 shifted value의 합은 LUT와 carry chain을
+소비한다. 따라서 ``DSP를 쓰지 않았다''와 ``면적이 작다''는 같은 말이 아니다.
+최종 \rtlfile{unifiedMUL}의 narrow-prime 경로는 선택된 shift 값과 9-bit
+addition을 사용하지만, 큰 곱 $T$와 $u q$는 DSP에 남겨 둔다. 연산의 성격에
+따라 hard multiplier와 shift/add를 나누는 사례다.
+
+\section{RTL을 읽을 때의 다섯 질문}
+
+\begin{checklistbox}
+\begin{enumerate}
+  \item 이 값은 어느 register에서 출발해 어느 register 또는 hard-block pin에 도착하는가?
+  \item 경로에 LUT, carry, mux, variable select가 몇 단계 이어지는가?
+  \item 가장 긴 net의 fanout과 physical distance는 얼마인가?
+  \item 데이터와 valid, address, mode가 같은 cycle을 가리키는가?
+  \item 합성 결과가 의도한 BRAM, DSP, SRL로 inference되었는가?
+\end{enumerate}
+\end{checklistbox}
+
+이 다섯 질문은 뒤의 모든 실제 사례에서 반복 사용한다. 별도의 ``좋은 코드
+목록''을 외우기보다 보고서와 회로 계약을 연결하는 편이 재사용 가능하다.
