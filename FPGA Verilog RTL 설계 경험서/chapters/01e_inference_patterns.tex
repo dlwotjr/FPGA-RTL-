@@ -1,0 +1,219 @@
+\chapter{BRAM, LUTRAM, SRL과 DSP inference}
+
+\begin{summarybox}[Inference의 의미]
+같은 기능도 RTL template에 따라 수많은 FF/LUT가 되거나 전용 BRAM, SRL, DSP로
+mapping될 수 있다. 합성기가 알아볼 수 있는 synchronous behavior를 쓰고, report와
+primitive cell을 확인할 때까지 inference가 되었다고 가정하지 않는다.
+\end{summarybox}
+
+\section{왜 coding style이 물리 자원을 바꾸는가}
+
+합성기는 RTL behavior가 target primitive가 제공하는 port, reset과 clock 동작에
+맞을 때 해당 hard resource로 치환한다. primitive가 지원하지 않는 동작을 요구하면
+주변 LUT가 붙거나 memory 전체가 register로 풀릴 수 있다.
+
+Unified NTT 초기 실험에서 memory inference가 깨졌을 때 LUT 563,561개와 FF
+191,202개, BRAM 0개라는 결과가 나왔다. 알고리즘이 갑자기 커진 것이 아니라 큰
+array가 FF/LUT로 구현된 실패였다. 정상 100~MHz baseline은 LUT 5,278, FF 3,072,
+BRAM tile 7.5였다. utilization order가 예상과 두 자릿수 이상 다르면 먼저
+inference warning과 memory cell을 확인해야 한다.
+
+\section{Block RAM: synchronous read를 명시한다}
+
+다음은 한 clock synchronous write/read의 기본 형태다.
+
+\begin{lstlisting}
+reg [22:0] mem [0:575];
+reg [22:0] rdata;
+
+always @(posedge clk) begin
+  if (we)
+    mem[waddr] <= wdata;
+  rdata <= mem[raddr];
+end
+\end{lstlisting}
+
+read address가 clock edge에서 sampling되고 \rtlfile{rdata}가 그 뒤에 갱신되는
+형태는 block RAM의 synchronous read와 잘 맞는다. 실제 inference는 depth/width,
+port 조합, read-during-write behavior와 device family에 따라 달라진다.
+
+다음처럼 array를 asynchronous하게 읽으면 LUTRAM 또는 register fabric을 요구할
+수 있다.
+
+\begin{lstlisting}
+assign rdata = mem[raddr];
+\end{lstlisting}
+
+작은 table에는 유효한 선택이다. 큰 coefficient memory에 사용하면 BRAM inference를
+잃고 LUT가 크게 늘 수 있다. 기능상 한 cycle read latency를 허용할 수 있는지 먼저
+architecture에서 결정해야 한다.
+
+\section{Reset과 memory initialization}
+
+모든 memory word를 reset loop로 0으로 만드는 behavior는 BRAM primitive가 한
+cycle에 제공하지 못할 수 있다.
+
+\begin{lstlisting}
+integer i;
+always @(posedge clk) begin
+  if (rst)
+    for (i = 0; i < 576; i = i + 1)
+      mem[i] <= 23'd0;
+  else if (we)
+    mem[waddr] <= wdata;
+end
+\end{lstlisting}
+
+이 코드는 576개 word에 동시에 reset 가능한 저장 element를 요구하는 셈이다.
+합성기가 BRAM을 포기할 수 있다. 저장 data 자체의 reset이 정말 필요한지 검토하고,
+valid bitmap 또는 initialization file로 관찰 가능성을 관리할 수 있다. 변경 뒤에는
+simulation startup, first transaction과 read-before-write를 검증한다.
+
+\section{True dual-port와 simple dual-port를 구분한다}
+
+두 개의 address가 있다고 모두 같은 dual-port RAM이 아니다.
+
+\begin{itemize}
+  \item simple dual-port는 보통 한 write port와 한 read port를 제공한다.
+  \item true dual-port는 두 port가 각각 read/write를 수행할 수 있다.
+  \item 같은 주소에 동시 접근할 때 결과는 write-first/read-first/no-change 설정과
+        primitive 동작에 의존한다.
+\end{itemize}
+
+필요한 cycle당 access가 primitive port보다 많으면 bank를 나누거나 memory를
+복제하거나 schedule을 바꿔야 한다. 이 추가 tile은 단순 capacity가 아니라
+bandwidth를 위한 비용이다.
+
+Unified NTT의 coefficient bank는 butterfly lane의 동시 read/write와 conflict-free
+mapping을 만족시키도록 구성된다. logical polynomial 크기만으로 tile 수를 계산하면
+이 병렬 접근 비용을 놓친다.
+
+\section{LUTRAM: 작은 memory와 asynchronous access}
+
+작은 array, register file과 table은 distributed RAM에 잘 맞을 수 있다.
+
+\begin{lstlisting}
+(* ram_style = "distributed" *) reg [7:0] table [0:31];
+always @(posedge clk)
+  if (we)
+    table[waddr] <= wdata;
+assign rdata = table[raddr];
+\end{lstlisting}
+
+LUTRAM은 logic LUT를 storage로 쓰며 SLICEM 위치를 요구한다. 작은 memory에서는
+BRAM tile의 width/depth 낭비를 피할 수 있지만, 많은 LUTRAM은 일반 logic과
+SLICEM을 경쟁하고 route를 늘릴 수 있다. attribute는 의도를 전달할 뿐 지원하지
+않는 behavior를 가능한 primitive로 바꾸지는 않는다.
+
+\section{SRL: reset 없는 delay line}
+
+매 cycle data를 한 칸씩 미루고 중간 state를 독립적으로 수정하지 않는 구조는
+SRL 후보다.
+
+\begin{lstlisting}
+reg [3:0] delay;
+always @(posedge clk) begin
+  if (ce)
+    delay <= {delay[2:0], din};
+end
+assign dout = delay[3];
+\end{lstlisting}
+
+한 bit의 여러-cycle delay를 LUT 내부 shift storage로 구현하면 FF chain보다 적은
+자원을 쓸 수 있다. 폭 $W$라면 각 bit lane에 SRL 자원이 반복된다.
+
+다음처럼 모든 stage를 reset하거나 각 tap을 별도 기능에서 사용하면 SRL inference가
+깨지거나 주변 logic가 늘 수 있다.
+
+\begin{lstlisting}
+always @(posedge clk) begin
+  if (rst)
+    delay <= 4'b0;
+  else
+    delay <= {delay[2:0], din};
+end
+\end{lstlisting}
+
+이번 동일조건 합성에서 23-bit data를 16 cycle 미루는 reset 없는 구조는 CLB LUT
+23개가 SRL16E 23개로 사용됐고 입출력 쪽 FF 46개가 남았다. 같은 delay 전체에
+reset을 추가하자 SRL은 0개가 되고 $23\times16=368$개의 FF로 합성됐다.
+
+reset 뒤 valid가 0인 동안 data가 관찰되지 않는다면 data delay 자체의 reset을
+제거하고 valid pipeline만 reset할 수 있는지 검토한다. 이는 기능 계약에 기반해야
+하며, first-valid cycle을 regression으로 확인한다. 나는 delay line을 볼 때
+``몇 cycle인가''보다 ``reset과 중간 tap이 정말 필요한가''를 먼저 확인한다.
+
+\section{DSP inference: 곱셈을 의도대로 보이게 쓴다}
+
+\begin{lstlisting}
+wire signed [15:0] a_s, b_s;
+wire signed [31:0] p_s = a_s * b_s;
+\end{lstlisting}
+
+곱셈 연산자를 직접 쓰면 합성기가 operand width와 signedness를 분석해 DSP 또는
+fabric implementation을 선택할 수 있다. 상수 곱을 손으로 shift-add로 완전히
+분해하면 fabric 구현을 고정하는 효과가 날 수 있다.
+
+\begin{lstlisting}
+wire [31:0] c2571 = (x << 11) + (x << 9)
+                    + (x << 3) + (x << 1) + x;
+\end{lstlisting}
+
+shift 자체는 배선이지만 다섯 operand를 더하는 adder tree가 생긴다. DSP budget이
+충분하면 \rtlfile{x * 2571}이 유리할 수 있고, DSP를 다른 multiplier에 예약해야
+하면 shift/add가 맞을 수 있다. 두 표현의 latency와 truncation을 bit-exact하게
+맞춰 비교한다.
+
+\section{DSP 내부 register와 latency}
+
+DSP input, multiplier와 output register를 사용하면 hard block 내부에서 path를
+분할할 수 있다. 그러나 synthesis retiming에 맡긴 결과와 RTL protocol이 기대한
+latency가 다르면 기능이 깨진다.
+
+\begin{lstlisting}
+always @(posedge clk) begin
+  a_q <= a;
+  b_q <= b;
+  p_q <= a_q * b_q;
+end
+\end{lstlisting}
+
+이 코드는 input register에서 multiplication result register까지 한 stage다.
+더 높은 frequency가 필요하면 product와 post-add 사이에 register를 두고, mode와
+valid도 같은 수만큼 이동한다. Unified NTT의 \rtlfile{unifiedMUL}은 두 DSP를
+six-stage pipeline 안에서 공유하며 매 cycle 새 입력을 받는다.
+
+\section{ROM inference와 word packing}
+
+상수 table은 case tree나 register array가 아니라 ROM으로 mapping되는지 확인한다.
+여러 mode의 narrow table을 각각 만들고 output MUX로 고르면 memory tile의 남는
+bit를 쓰지 못할 수 있다. 동일한 read latency와 port 요구를 가진 table은 하나의
+넓은 word 안에 pack할 수 있다.
+
+\begin{lstlisting}
+wire [31:0] rom_word = rom[base + logical_addr[10:1]];
+wire [15:0] twiddle  = logical_addr[0]
+                     ? rom_word[31:16] : rom_word[15:0];
+\end{lstlisting}
+
+이 구조는 주소 base와 word 내부 slot 선택을 추가하지만 여러 table의 storage를
+공유할 수 있다. address arithmetic와 slot MUX가 BRAM input/output timing에 붙는지
+검토하고 필요하면 physical address와 slot tag를 register한다.
+
+작은 memory와 큰 memory의 차이도 같은 합성에서 확인했다. 32$\times$8
+asynchronous-read memory는 CLB LUT 8개를 LUTRAM으로 사용했고,
+576$\times$23 synchronous memory는 RAMB36E1 하나가 됐다. total bit만으로
+primitive 수를 나누지 않고 depth, width와 port mode까지 보게 된 이유다.
+
+\section{Inference 실패를 찾는 보고서 순서}
+
+\begin{checklistbox}
+\begin{enumerate}
+  \item synthesis log의 inferred RAM/DSP/SRL 요약과 warning을 읽는다.
+  \item utilization에서 예상한 RAMB36/RAMB18/DSP/SRL cell 수를 확인한다.
+  \item hierarchy별 LUT/FF가 비정상적으로 폭증한 module을 찾는다.
+  \item schematic 또는 cell query로 array가 어떤 primitive가 되었는지 확인한다.
+  \item memory read latency와 read-during-write behavior를 simulation으로 검증한다.
+  \item post-route에서 BRAM/DSP pin 전후가 새 critical path인지 확인한다.
+\end{enumerate}
+\end{checklistbox}

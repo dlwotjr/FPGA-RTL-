@@ -1,16 +1,27 @@
 # FPGA/Verilog RTL 설계 경험서
 
-실제 Unified NTT 가속기가 100 MHz baseline에서 150 MHz 구현으로 발전한 과정을
-중심으로, FPGA RTL의 area와 timing을 함께 설명하는 경험서입니다.
+Verilog RTL을 읽고 어떤 FPGA 회로가 생기는지, 면적이 얼마나 들지, 한 cycle의
+timing이 가능한지를 예측하는 설계 경험서입니다. LUT·FF·Slice·CARRY4·DSP48E1·
+BRAM·LUTRAM·SRL의 구조에서 시작해 일반적인 RTL 연산과 coding pattern을 실제
+회로로 번역합니다.
 
-특히 실패한 timing run도 설계 기록으로 남겼습니다. 23-bit subtraction과
-conditional correction이 한 cycle에 이어진 경로, ML-DSA product 결합 뒤의
-12-CARRY4 경로, Montgomery 다중 operand addition, NTRU+ 상수곱의 pipeline
-misalignment를 실제 수치와 함께 설명합니다.
+Unified NTT 가속기는 이 설명의 대상 자체가 아니라, 설계 직관을 검증하는 실제
+사례로 사용합니다. 동일조건 operator synthesis와 100/150/200 MHz post-route
+경험을 통해 구조 근사와 실제 LUT·FF·CARRY4·DSP·BRAM 및 ns 결과를 연결합니다.
 
-기존 판의 반복적인 `개념 → 쉬운 예 → 주의할 예 → 좋은 예 → area → timing`
-구성을 정리하고, 다음과 같은 실제 RTL 사례를 `관찰 → 원인 → 구조 변경 → 검증
-계약 → 측정 결과` 순서로 다시 구성했습니다.
+## 이 저장소가 보여 주는 설계 역량
+
+- LUT6의 입력 수와 1-bit 출력 관점에서 bus logic의 LUT 수를 예측하는 법
+- FF 수와 slice packing을 구분하고 control set의 영향을 판단하는 법
+- `assign`, clocked `always`, `if/case`, loop가 조합회로·register·MUX·병렬
+  hardware가 되는 과정
+- add/subtract/comparator/correction/MUX/shift/multiply의 실제 primitive mapping
+- bit width, 병렬도, pipeline metadata와 memory port에서 면적을 손으로 추정하는 법
+- carry depth, MUX 위치, fanout, logic/route delay에서 timing을 판단하는 법
+- BRAM/LUTRAM/SRL/DSP inference가 되는 코드와 깨지는 코드
+- 합성 근사치를 post-synthesis utilization과 post-route timing으로 검증하는 방법
+
+실전부에서는 다음 경험을 위의 일반 원칙에 연결합니다.
 
 - DUMP 주소에서 BRAM까지 이어진 8-LUT, 9.077 ns critical path
 - DUMP 경로 수정 뒤 드러난 LOAD의 8-LUT, fanout-95 routing 병목
@@ -34,18 +45,35 @@ misalignment를 실제 수치와 함께 설명합니다.
 
 ## 목차
 
+### FPGA 자원과 RTL 합성의 기본기
+
 1. RTL을 회로로 읽는 기준
-2. 측정 범위와 보고서 읽기
-3. 사례 설계의 계층과 발전 과정
-4. Timing closure 실제 사례
-5. 150 MHz에 연산을 담기까지
-6. Area와 inference 실제 사례
-7. Verilog 연산자의 실제 자원 비용
-8. 공유 산술기와 pipeline 설계
-9. Scheduler, memory mapping, interface
-10. 최적화를 깨지 않게 검증하는 방법
-11. 반복 가능한 최적화 workflow
-12. 측정 결과와 설계 결론
+2. LUT, FF, Slice와 전용 자원의 기본기
+3. Verilog 구문을 실제 회로로 번역하는 법
+4. Verilog 연산자의 실제 자원 비용
+5. BRAM, LUTRAM, SRL과 DSP inference
+
+### 면적과 Timing을 예측하는 설계 직관
+
+6. RTL을 보고 면적을 예측하는 직관
+7. 연산과 배선에서 timing을 예측하는 직관
+8. 자주 쓰는 RTL 구조의 Area–Timing Trade-off
+9. 측정 범위와 보고서 읽기
+
+### Unified NTT에서 검증한 실제 설계 경험
+
+10. 아키텍처를 발전시키는 구조적 판단
+11. Memory 경계의 Timing Closure
+12. 한 Cycle의 연산량과 Pipeline 배치
+13. Memory와 Metadata의 Area 최적화
+14. Modular Arithmetic의 자원 공유와 Pipeline
+15. Scheduler와 Interface의 성능 및 면적
+
+### 검증, 반복 workflow와 측정 결과
+
+16. 최적화를 깨지 않게 검증하는 방법
+17. 반복 가능한 최적화 workflow
+18. 측정으로 설계 판단을 검증하는 법
 
 ## PDF 빌드
 

@@ -10,7 +10,7 @@ OOC synthesis를 수행했다.
 \begin{itemize}
   \item Vivado 2020.2, \rtlfile{xc7z020clg484-1}
   \item \rtlfile{flatten\_hierarchy none}
-  \item 각 instance의 input/output 사이에 한 register boundary
+  \item arithmetic instance의 input/output 사이에 한 register boundary
   \item instance 사이의 흡수와 제거를 막기 위한 hierarchy 보존
   \item place/route 이전의 post-synthesis primitive count
 \end{itemize}
@@ -22,7 +22,7 @@ RTL 연산 & LUT & CARRY4 & FF & DSP & 해석 \\
 23-bit \rtlfile{a+b} & 23 & 6 & 69 & 0 & 한 carry chain \\
 23-bit \rtlfile{a-b} & 23 & 6 & 69 & 0 & 한 carry chain \\
 23-bit \rtlfile{a==b} & 8 & 2 & 47 & 0 & bit 비교와 reduction \\
-23-bit unsigned \rtlfile{a<b} & 24 & 3 & 47 & 0 & magnitude compare \\
+23-bit unsigned \rtlfile{a<b} & 12 & 3 & 47 & 0 & LUT packing된 magnitude compare \\
 \rtlfile{a>=8380417} & 6 & 0 & 24 & 0 & constant bit pattern으로 축소 \\
 23-bit 2:1 MUX & 23 & 0 & 70 & 0 & output bit당 LUT 하나 \\
 23-bit 4:1 MUX & 23 & 0 & 117 & 0 & 4 data+2 select가 LUT6에 들어감 \\
@@ -31,6 +31,20 @@ RTL 연산 & LUT & CARRY4 & FF & DSP & 해석 \\
 23$\times$16 multiply & 0 & 0 & 39 & 1 & DSP48E1로 흡수 \\
 23-bit modular subtraction & 46 & 12 & 92 & 0 & subtract와 conditional add \\
 13-input reduction OR & 3 & 0 & 14 & 0 & 작은 reduction tree \\
+\bottomrule
+\end{longtable}
+
+\newpage
+같은 top에 storage inference 예제도 넣었다.
+
+\begin{longtable}{L{48mm}r r r r r L{37mm}}
+\toprule
+RTL 구조 & CLB LUT & LUTRAM & SRL & FF & R36 & 해석 \\
+\midrule
+16-cycle $\times$ 23-bit delay, no reset & 23 & 0 & 23 & 46 & 0 & SRL16E와 입출력 FF \\
+16-cycle $\times$ 23-bit delay, reset & 0 & 0 & 0 & 368 & 0 & $16\times23$ FF chain \\
+32$\times$8 asynchronous-read RAM & 8 & 8 & 0 & 0 & 0 & distributed LUTRAM \\
+576$\times$23 synchronous RAM & 0 & 0 & 0 & 0 & 1 & RAMB36E1 \\
 \bottomrule
 \end{longtable}
 
@@ -75,8 +89,10 @@ timing 양쪽에서 설명할 수 있다.
 \section{Comparator: 같은 23 bit라도 비용이 다르다}
 
 \rtlfile{==}는 bit별 equality와 reduction으로 구현할 수 있다. 이 실험의
-23-bit equality는 8 LUT와 2 CARRY4였다. unsigned magnitude compare는
-bit의 우선순위를 판단해야 하므로 24 LUT와 3 CARRY4를 사용했다.
+23-bit equality는 CLB LUT 8개와 CARRY4 2개였다. unsigned magnitude compare는
+bit의 우선순위를 판단해야 하며 CLB LUT 12개와 CARRY4 3개를 사용했다. netlist의
+개별 LUT function 수와 hierarchy report의 physical CLB LUT 수는 LUT6\_2 packing
+때문에 다를 수 있으므로, 이 표는 hierarchy utilization의 CLB LUT를 기준으로 했다.
 
 constant compare는 더 작아질 수 있다. ML-DSA modulus
 8,380,417과의 23-bit \rtlfile{>=} 비교는 6 LUT, CARRY4 0개로 줄었다.
@@ -157,6 +173,36 @@ area를 사용한 명시적인 trade-off다.
 fanout과 route가 critical path가 될 수 있다. 최종 core가
 \rtlfile{|valid\_pipe}를 occupancy counter로 바꾼 이유는 LUT 세 개 자체보다
 그 reduction 결과의 timing cone을 없애기 위해서다.
+
+\section{같은 delay가 SRL 또는 368 FF가 되는 이유}
+
+23-bit data를 16 cycle 미루는 두 RTL도 함께 합성했다. reset이 없는 delay는
+23개의 SRL16E와 46개의 입출력 FF로 mapping됐다. 같은 delay vector 전체에
+synchronous reset을 추가한 구조는 SRL을 사용하지 못하고 정확히
+$23\times16=368$개의 FF로 남았다.
+
+이 결과를 보고 내가 얻은 기준은 ``delay가 보이면 SRL''이 아니라 다음과 같다.
+
+\begin{enumerate}
+  \item 중간 tap을 독립적으로 읽거나 수정하는가?
+  \item data 자체를 reset해야 하는가, valid만 reset하면 되는가?
+  \item enable과 delay 길이가 SRL template에 맞는가?
+  \item 합성 report에 SRL16E/SRLC32E가 실제로 나타났는가?
+\end{enumerate}
+
+reset을 없애기 위해 기능을 바꾸면 안 된다. valid가 0인 동안 data가 관찰되지
+않는다는 protocol을 먼저 확인하고 first-valid cycle을 regression으로 검사한다.
+
+\section{같은 저장량도 LUTRAM 또는 BRAM이 된다}
+
+32$\times$8 asynchronous-read memory는 8개의 CLB LUT를 memory로 사용했다.
+576$\times$23 synchronous memory는 RAMB36E1 하나가 됐다. 13,248 bit라는
+capacity만 보면 RAMB18에 가까워 보이지만 576-word depth와 23-bit width를 함께
+지원하는 configuration 때문에 RAMB36 하나로 mapping됐다.
+
+이 경험 때문에 memory area를 계산할 때 단순히 total bit를 BRAM capacity로
+나누지 않는다. depth, width, read/write port와 synchronous read latency를 먼저
+적고 실제 primitive configuration을 확인한다.
 
 \section{면적을 예상하는 순서}
 

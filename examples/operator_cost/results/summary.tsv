@@ -1,13 +1,17 @@
-top	LUT	CARRY4	FF	DSP48E1	RAMB36E1	RAMB18E1
-op_add23	23	6	69	0	0	0
-op_sub23	23	6	69	0	0	0
-op_eq23	8	2	47	0	0	0
-op_lt23	24	3	47	0	0	0
-op_ge_const23	6	0	24	0	0	0
-op_mux2_23	23	0	70	0	0	0
-op_mux4_23	23	0	117	0	0	0
-op_shift_const23	0	0	41	0	0	0
-op_shift_var23	64	0	51	0	0	0
-op_mul23x16	0	0	39	1	0	0
-op_modsub23	46	12	92	0	0	0
-op_reduce_or13	3	0	14	0	0	0
+top	CLB_LUT	LUT_LOGIC	LUTRAM	SRL	CARRY4	FF	DSP48E1	RAMB36E1	RAMB18E1
+op_add23	23	23	0	0	6	69	0	0	0
+op_sub23	23	23	0	0	6	69	0	0	0
+op_eq23	8	8	0	0	2	47	0	0	0
+op_lt23	12	12	0	0	3	47	0	0	0
+op_ge_const23	6	6	0	0	0	24	0	0	0
+op_mux2_23	23	23	0	0	0	70	0	0	0
+op_mux4_23	23	23	0	0	0	117	0	0	0
+op_shift_const23	0	0	0	0	0	41	0	0	0
+op_shift_var23	64	64	0	0	0	51	0	0	0
+op_mul23x16	0	0	0	0	0	39	1	0	0
+op_modsub23	46	46	0	0	12	92	0	0	0
+op_reduce_or13	3	3	0	0	0	14	0	0	0
+op_srl16x23	23	0	0	23	0	46	0	0	0
+op_ffdelay16x23_reset	0	0	0	0	0	368	0	0	0
+op_lutram32x8	8	0	8	0	0	0	0	0	0
+op_bram576x23	0	0	0	0	0	0	0	1	0

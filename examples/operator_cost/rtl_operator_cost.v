@@ -10,6 +10,9 @@
 
 module operator_cost_all (
     input  wire         clk,
+    input  wire         rst,
+    input  wire         ce,
+    input  wire         mem_we,
     input  wire [22:0]  a,
     input  wire [22:0]  b,
     input  wire [22:0]  c,
@@ -17,12 +20,17 @@ module operator_cost_all (
     input  wire [22:0]  q,
     input  wire [4:0]   sh,
     input  wire [1:0]   sel,
-    output wire [203:0] observed
+    input  wire [9:0]   mem_waddr,
+    input  wire [9:0]   mem_raddr,
+    input  wire [7:0]   mem_din,
+    output wire [280:0] observed
 );
     wire [22:0] add_y, sub_y, mux2_y, mux4_y;
     wire [22:0] shift_const_y, shift_var_y, modsub_y;
     wire [38:0] mul_y;
     wire eq_y, lt_y, ge_const_y, reduce_or_y;
+    wire [22:0] srl_delay_y, ff_delay_y, bram_y;
+    wire [7:0] lutram_y;
 
     (* keep_hierarchy = "yes", dont_touch = "true" *)
     op_add23 u_add (.clk(clk), .a(a), .b(b), .y(add_y));
@@ -62,10 +70,31 @@ module operator_cost_all (
     op_reduce_or13 u_reduce_or (
         .clk(clk), .a(a[12:0]), .y(reduce_or_y)
     );
+    (* keep_hierarchy = "yes", dont_touch = "true" *)
+    op_srl16x23 u_srl_delay (
+        .clk(clk), .ce(ce), .a(a), .y(srl_delay_y)
+    );
+    (* keep_hierarchy = "yes", dont_touch = "true" *)
+    op_ffdelay16x23_reset u_ff_delay (
+        .clk(clk), .rst(rst), .ce(ce), .a(a), .y(ff_delay_y)
+    );
+    (* keep_hierarchy = "yes", dont_touch = "true" *)
+    op_lutram32x8 u_lutram (
+        .clk(clk), .we(mem_we),
+        .waddr(mem_waddr[4:0]), .raddr(mem_raddr[4:0]),
+        .wdata(mem_din), .rdata(lutram_y)
+    );
+    (* keep_hierarchy = "yes", dont_touch = "true" *)
+    op_bram576x23 u_bram (
+        .clk(clk), .we(mem_we),
+        .waddr(mem_waddr), .raddr(mem_raddr),
+        .wdata(a), .rdata(bram_y)
+    );
 
     assign observed = {
         add_y, sub_y, eq_y, lt_y, ge_const_y, mux2_y, mux4_y,
-        shift_const_y, shift_var_y, mul_y, modsub_y, reduce_or_y
+        shift_const_y, shift_var_y, mul_y, modsub_y, reduce_or_y,
+        srl_delay_y, ff_delay_y, lutram_y, bram_y
     };
 endmodule
 
@@ -210,5 +239,65 @@ module op_reduce_or13 (
     (* dont_touch = "true" *) reg [12:0] a_q;
     always @(posedge clk) begin
         a_q <= a; y <= |a_q;
+    end
+endmodule
+
+module op_srl16x23 (
+    input wire clk, input wire ce, input wire [22:0] a,
+    output wire [22:0] y
+);
+    genvar g;
+    generate
+        for (g = 0; g < 23; g = g + 1) begin : gen_srl
+            (* shreg_extract = "yes" *) reg [15:0] delay_q;
+            always @(posedge clk)
+                if (ce)
+                    delay_q <= {delay_q[14:0], a[g]};
+            assign y[g] = delay_q[15];
+        end
+    endgenerate
+endmodule
+
+module op_ffdelay16x23_reset (
+    input wire clk, input wire rst, input wire ce, input wire [22:0] a,
+    output wire [22:0] y
+);
+    genvar g;
+    generate
+        for (g = 0; g < 23; g = g + 1) begin : gen_ff_delay
+            (* shreg_extract = "no" *) reg [15:0] delay_q;
+            always @(posedge clk) begin
+                if (rst)
+                    delay_q <= 16'd0;
+                else if (ce)
+                    delay_q <= {delay_q[14:0], a[g]};
+            end
+            assign y[g] = delay_q[15];
+        end
+    endgenerate
+endmodule
+
+module op_lutram32x8 (
+    input wire clk, input wire we,
+    input wire [4:0] waddr, input wire [4:0] raddr,
+    input wire [7:0] wdata, output wire [7:0] rdata
+);
+    (* ram_style = "distributed" *) reg [7:0] mem [0:31];
+    always @(posedge clk)
+        if (we)
+            mem[waddr] <= wdata;
+    assign rdata = mem[raddr];
+endmodule
+
+module op_bram576x23 (
+    input wire clk, input wire we,
+    input wire [9:0] waddr, input wire [9:0] raddr,
+    input wire [22:0] wdata, output reg [22:0] rdata
+);
+    (* ram_style = "block" *) reg [22:0] mem [0:575];
+    always @(posedge clk) begin
+        if (we)
+            mem[waddr] <= wdata;
+        rdata <= mem[raddr];
     end
 endmodule

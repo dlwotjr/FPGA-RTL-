@@ -1,0 +1,337 @@
+\chapter{자주 쓰는 RTL 구조의 Area--Timing Trade-off}
+
+\begin{summarybox}[좋은 코드는 목표에 따라 달라진다]
+면적만 줄이는 코드와 timing만 줄이는 코드는 다를 수 있다. 이 장은 자주 쓰는
+RTL 패턴을 생성 회로, area, timing, trade-off와 verification 순으로 비교한다.
+Unified NTT 사례는 각 판단이 실제 설계에서 어떻게 나타났는지 확인하는 근거다.
+\end{summarybox}
+
+\section{긴 adder chain과 balanced tree}
+
+여러 operand를 왼쪽부터 더하면 RTL은 짧아도 carry가 직렬로 이어질 수 있다.
+
+\begin{lstlisting}
+// A long dependency chain may be formed.
+wire [24:0] sum_chain = a + b + c + d;
+\end{lstlisting}
+
+독립 operand라면 두 쌍을 먼저 더해 tree depth를 줄일 수 있다.
+
+\begin{lstlisting}
+wire [23:0] s0 = {1'b0, a} + {1'b0, b};
+wire [23:0] s1 = {1'b0, c} + {1'b0, d};
+wire [24:0] sum_tree = {1'b0, s0} + {1'b0, s1};
+\end{lstlisting}
+
+두 구조의 adder 수는 비슷하지만 dependency depth가 다르다. 합성기가 associative
+expression을 재균형화할 수 있어도 signedness, truncation과 saturation이 끼면
+자유롭게 바꾸기 어렵다.
+
+\begin{itemize}
+  \item \textbf{Area}: 총 carry/LUT 수는 비슷할 수 있고 intermediate guard bit가 늘 수 있다.
+  \item \textbf{Timing}: chain은 carry depth가 세 번, balanced tree는 두 level에서 시작한다.
+  \item \textbf{Verification}: 각 intermediate 폭과 최종 truncation이 원식과 같은지 확인한다.
+\end{itemize}
+
+Montgomery 경로에서 여러 9-bit operand를 한 식에 모았던 실험은 carry와 MUX가
+깊게 결합됐다. 최종판은 일부 합을 앞 stage에서 만들고 다음 stage에서 남은 항을
+더해 cycle 경계를 사용했다.
+
+\section{MUX-then-arithmetic와 arithmetic-then-MUX}
+
+\begin{lstlisting}
+// Operator sharing favors area.
+wire [22:0] y_shared = a + (mode ? b : c);
+
+// Parallel arithmetic can shorten the select-to-result path.
+wire [22:0] y_parallel = mode ? (a + b) : (a + c);
+\end{lstlisting}
+
+\begin{itemize}
+  \item \textbf{Area}: 첫 식은 operand MUX와 adder 하나, 두 번째는 adder 두 개와 result MUX 후보이다.
+  \item \textbf{Timing}: 첫 식은 MUX 뒤에 carry가 시작되고, 두 번째는 add와 select가 병렬 진행될 수 있다.
+  \item \textbf{Trade-off}: DSP처럼 큰 operator는 공유 가치가 크고 작은 adder는 MUX 비용이 상대적으로 크다.
+  \item \textbf{Verification}: mode가 data와 같은 stage인지 확인한다.
+\end{itemize}
+
+최종 \rtlfile{unifiedMUL}은 DSP 두 개를 여러 mode가 공유하는 쪽을 선택했다. 반면
+butterfly 첫 stage의 mode별 결과를 너무 빨리 공통 rail로 합치면 carry 뒤 result
+MUX가 critical path에 붙었으므로 결과를 한 stage 더 분리했다.
+
+\section{Compare--subtract--correction chain}
+
+\begin{lstlisting}
+wire [22:0] r0 = (x >= Q) ? x - Q : x;
+wire [22:0] r1 = (r0 >= Q) ? r0 - Q : r0;
+\end{lstlisting}
+
+짧은 두 줄이지만 comparator, subtractor와 MUX가 반복된다. 입력 범위를 증명하면
+보정 횟수를 줄이거나 raw subtract의 sign/borrow를 직접 사용할 수 있다.
+
+\begin{lstlisting}
+wire [23:0] raw = {1'b0, a} - {1'b0, b};
+wire [23:0] addq = raw + {1'b0, Q};
+wire [22:0] y = raw[23] ? addq[22:0] : raw[22:0];
+\end{lstlisting}
+
+이 표현도 carry 두 번을 한 cycle에 포함할 수 있다. 150 MHz가 목표라면 raw와
+correction 사이 register를 검토한다. range proof가 없는 correction 제거는
+면적 최적화가 아니라 기능 오류다.
+
+\section{Variable shift와 enumerated constant shift}
+
+\begin{lstlisting}
+wire [22:0] y_var = x << shamt;
+\end{lstlisting}
+
+runtime \rtlfile{shamt}는 여러 shifted value를 고르는 barrel MUX를 만든다. 실제
+지원 값이 세 개뿐이라면 세 constant wiring 후보를 case로 선택할 수 있다.
+
+\begin{lstlisting}
+always @* begin
+  case (mode)
+    2'd0: y = x << 4;
+    2'd1: y = x << 6;
+    default: y = x << 7;
+  endcase
+end
+\end{lstlisting}
+
+이 경우 shift는 wiring이고 mode MUX만 남는다. 이번 23-bit 실험에서 constant
+shift는 LUT 0, variable shift는 LUT 64였다. 지원하지 않는 shift 값을 제거한
+것이므로 mode 범위 assertion과 exhaustive test가 필요하다.
+
+\section{Priority chain과 parallel selection}
+
+\begin{lstlisting}
+if      (req[0]) y = d0;
+else if (req[1]) y = d1;
+else if (req[2]) y = d2;
+else             y = d3;
+\end{lstlisting}
+
+여러 request가 동시에 1일 때 낮은 index가 이겨야 한다면 priority chain이 기능의
+일부다. 원래 one-hot selector라면 case/one-hot MUX와 assertion으로 의도를 분리할
+수 있다.
+
+\begin{lstlisting}
+case (sel)
+  2'd0: y = d0;
+  2'd1: y = d1;
+  2'd2: y = d2;
+  default: y = d3;
+endcase
+\end{lstlisting}
+
+\begin{itemize}
+  \item priority chain은 조건 수가 늘수록 select dependency가 길어질 수 있다.
+  \item parallel selection은 decode fanout과 data MUX가 생긴다.
+  \item 기능이 다른 두 구조를 timing만 보고 바꾸지 않는다.
+\end{itemize}
+
+\section{Decode-first와 arithmetic control}
+
+복잡한 mode 비교를 여러 arithmetic branch마다 반복하면 decode logic와 high-fanout
+net이 생길 수 있다.
+
+\begin{lstlisting}
+wire is_r3 = (mode == MODE_R3_A) || (mode == MODE_R3_B);
+reg  is_r3_q;
+always @(posedge clk)
+  is_r3_q <= is_r3;
+
+wire [22:0] y = is_r3_q ? r3_value : r2_value;
+\end{lstlisting}
+
+decode를 한 번 계산해 register하면 다음 stage는 1-bit control만 본다. FF 한
+bit와 latency가 늘지만 반복 comparator와 긴 control route를 줄일 수 있다.
+같은 mode가 transaction 동안 고정된다는 전제가 있다면 stage마다 decode를 다시
+계산하지 않는 구조도 가능하다.
+
+\section{Register replication과 high fanout}
+
+Fanout은 하나의 신호가 구동하는 input pin의 수다. 아래처럼 하나의 enable을
+datapath register, BRAM control과 valid 생성에 함께 쓰면 lane과 port를 추가할
+때마다 load가 늘어난다.
+
+\begin{lstlisting}
+wire core_enable = (state == ST_CORE) && run;
+
+always @(posedge clk) begin
+  if (core_enable) begin
+    a_pipe <= a_in;
+    b_pipe <= b_in;
+    c_pipe <= c_in;
+    d_pipe <= d_in;
+  end
+end
+
+assign bram_a_en = core_enable && bank_sel_a;
+assign bram_b_en = core_enable && bank_sel_b;
+assign valid_in  = core_enable && input_ready;
+\end{lstlisting}
+
+RTL만 보면 \rtlfile{core\_enable}은 비교와 AND 몇 개로 만든 작은 신호다. 하지만
+합성 후에는 여러 LUT의 select와 여러 FF의 enable pin까지 연결된다. sink가 서로
+멀리 배치되면 하나의 net이 넓은 영역을 지나가므로 logic가 작아도 route delay가
+critical path를 지배할 수 있다.
+
+내 200~MHz 목표 RTL의 LOAD-to-BRAM 경로에서 이 문제가 실제로 나타났다.
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+항목 & 측정값 \\
+\midrule
+전체 data-path delay & 7.913~ns \\
+Logic delay & 1.448~ns \\
+Route delay & 6.465~ns \\
+Route 비율 & 81.7\% \\
+Logic level & LUT 8단 \\
+관찰된 fanout & 95 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+처음에는 LUT 8단을 먼저 줄이고 싶었지만, 전체 지연의 81.7\%가 배선이었다.
+이 경우 Boolean 식을 조금 줄이는 것만으로 5 ns 안에 들어가기 어렵다. LOAD 상태,
+layout mapping과 memory control이 너무 많은 BRAM input까지 퍼진 구조가 핵심이었다.
+
+다음처럼 wire 이름만 나누어도 실제 driver는 복제되지 않는다.
+
+\begin{lstlisting}
+wire load_en_a = load_enable;
+wire load_en_b = load_enable;
+wire load_en_c = load_enable;
+\end{lstlisting}
+
+합성기는 세 alias가 같은 값임을 알고 하나의 net으로 합칠 수 있다. 내가 먼저 한
+일은 register를 무조건 복제하는 것이 아니라, LOAD 요청을 한 번 physical memory
+command로 변환하고 BRAM-facing boundary에 저장하는 것이었다.
+
+\begin{lstlisting}
+always @(posedge clk) begin
+  if (load_accept) begin
+    host_valid_q <= 1'b1;
+    host_bank_q  <= mapped_bank;
+    host_addr_q  <= mapped_addr;
+    host_data_q  <= load_data;
+    host_we_q    <= mapped_we;
+  end else begin
+    host_valid_q <= 1'b0;
+  end
+end
+
+assign bram_addr = host_addr_q;
+assign bram_we   = host_valid_q && host_we_q;
+assign bram_din  = host_data_q;
+\end{lstlisting}
+
+이 구조에서는 LOAD/BUSY/layout 조건이 BRAM port마다 다시 계산되지 않는다.
+address, bank와 write enable도 같은 register 경계에서 정렬된다. 최종 150~MHz
+구현에서는 LOAD/DUMP address path가 worst path에서 사라지고 병목이 butterfly
+arithmetic으로 이동했다. fanout 하나의 최종 숫자만 비교한 결과는 아니지만,
+high-fanout control을 BRAM-facing cone에서 제거한 효과를 path 이동으로 확인했다.
+
+그래도 하나의 enable register가 물리적으로 먼 여러 영역을 계속 구동하면
+region별 register replication을 검토한다.
+
+\begin{lstlisting}
+(* keep = "true" *)
+reg en_left_q, en_right_q;
+always @(posedge clk) begin
+  en_left_q  <= en;
+  en_right_q <= en;
+end
+\end{lstlisting}
+
+왼쪽 datapath는 \rtlfile{en\_left\_q}, 오른쪽 datapath는
+\rtlfile{en\_right\_q}를 사용한다. 기능적으로 같은 register를 region별로
+복제하면 load와 물리적 영역을 나눌 수 있다.
+
+\begin{itemize}
+  \item \textbf{Area}: FF와 clock load가 조금 증가한다.
+  \item \textbf{Timing}: control route와 skewed arrival가 줄 수 있다.
+  \item \textbf{Tool interaction}: 합성기가 equivalent register를 merge할 수 있다.
+  \item \textbf{Verification}: 두 복제 값이 항상 같고 reset/enable도 일치해야 한다.
+\end{itemize}
+
+복제된 register는 합성기가 다시 합칠 수 있으므로 실제 netlist에서 cell이
+유지됐는지 확인한다. 내가 fanout 문제를 보는 순서는 다음과 같다.
+
+\begin{enumerate}
+  \item fanout 숫자와 함께 route-delay 비율을 확인한다.
+  \item 그 control이 필요하지 않은 block까지 퍼지는지 찾는다.
+  \item 반복되는 state/mode 해석을 local registered command로 바꾼다.
+  \item 그래도 물리적으로 넓으면 region별 register replication을 검토한다.
+  \item 수정 후 새 worst path가 어디로 이동했는지 확인한다.
+\end{enumerate}
+
+\section{Pipeline placement: 식 가운데가 아니라 경로 경계}
+
+\begin{lstlisting}
+// One long stage
+always @(posedge clk)
+  y_q <= ((a + b) >= Q) ? (a + b - Q) : (a + b);
+\end{lstlisting}
+
+raw sum을 register하면 carry와 correction을 다른 cycle에 둘 수 있다.
+
+\begin{lstlisting}
+always @(posedge clk) begin
+  raw_q <= {1'b0, a} + {1'b0, b};
+  y_q   <= (raw_q >= Q) ? raw_q - Q : raw_q;
+end
+\end{lstlisting}
+
+\begin{itemize}
+  \item \textbf{Area}: raw data와 valid/mode/address를 위한 FF가 늘어난다.
+  \item \textbf{Timing}: carry chain 사이에 register boundary가 생긴다.
+  \item \textbf{Latency}: 한 transaction의 결과가 한 cycle 늦어진다.
+  \item \textbf{Throughput}: 두 stage가 매 cycle 동작하면 II=1을 유지할 수 있다.
+\end{itemize}
+
+NTRU+ constant-multiply path에 stage 하나를 추가했던 첫 시도는 arithmetic timing은
+나아졌지만 다른 butterfly branch와 writeback address가 어긋나 기능이 깨졌다.
+최종 수정은 모든 branch의 common delay와 schedule compensation을 함께 바꿨다.
+
+\section{Minimum width와 guard bit}
+
+모든 intermediate를 편의상 32 bit로 만들면 MUX, register, adder와 comparator가
+그 폭으로 반복될 수 있다. 실제 범위가 9 bit라면 9-bit datapath로 유지하는 것이
+area와 carry depth에 유리하다.
+
+반대로 modular add/subtract의 carry, borrow 또는 signed correction을 위해 한 bit
+guard가 필요할 수 있다. 최소 폭은 ``가장 작은 선언''이 아니라 모든 가능한
+intermediate를 보존하는 가장 작은 폭이다.
+
+\begin{enumerate}
+  \item operand range를 적는다.
+  \item add/subtract/multiply 뒤의 최대·최소값을 계산한다.
+  \item 필요한 signed bit와 guard bit를 정한다.
+  \item truncation 시점과 modular equivalence를 증명한다.
+  \item boundary value를 simulation/formal assertion으로 확인한다.
+\end{enumerate}
+
+\section{Reset과 enable을 필요한 state에만 둔다}
+
+data pipeline 전체를 reset하면 control set과 routing이 늘고 SRL/DSP/BRAM register
+inference를 막을 수 있다. valid가 0일 때 data가 관찰되지 않는 구조라면 valid와
+protocol state만 reset할 수 있다.
+
+이 최적화는 initialization을 무시하는 방법이 아니다. reset release 뒤 first
+valid transaction, backpressure, pipeline flush와 stale data가 output에 노출되지
+않는다는 계약을 검증해야 한다.
+
+\section{패턴을 적용하기 전의 질문}
+
+\begin{checklistbox}
+\begin{enumerate}
+  \item 이 변경은 LUT, FF, DSP와 BRAM 중 무엇을 줄이고 무엇을 늘리는가?
+  \item critical path에서 MUX, carry와 route의 순서가 어떻게 바뀌는가?
+  \item latency와 initiation interval이 각각 어떻게 변하는가?
+  \item data와 valid, mode, address의 alignment를 어디서 보장하는가?
+  \item 합성기가 다시 공유, 복제 또는 trimming할 가능성을 report에서 확인했는가?
+  \item 같은 top/device/constraint의 변경 전후 결과가 있는가?
+\end{enumerate}
+\end{checklistbox}

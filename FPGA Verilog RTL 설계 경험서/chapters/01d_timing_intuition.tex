@@ -1,0 +1,211 @@
+\chapter{연산과 배선에서 timing을 예측하는 직관}
+
+\begin{summarybox}[Timing을 읽는 핵심]
+연산자마다 고정된 지연 시간이 있는 것이 아니다. 같은 adder도 bit 폭, carry 앞뒤
+MUX, source와 destination의 위치, fanout과 congestion에 따라 달라진다. 먼저
+register-to-register 경로를 그리고 logic delay와 route delay를 나눈 뒤, clock
+budget 안에 들어가는지 판단한다.
+\end{summarybox}
+
+\section{주파수를 한 cycle의 시간으로 바꾼다}
+
+clock period는 $T=1/f$다.
+
+\begin{longtable}{C{32mm}C{42mm}L{82mm}}
+\toprule
+Frequency & Nominal period & 설계자가 기억할 점 \\
+\midrule
+\endhead
+100~MHz & 10.000~ns & 실제 data-path budget은 uncertainty와 setup 때문에 더 작다. \\
+130~MHz & 7.692~ns & 8~ns에 가까운 조합 경로는 들어가지 않는다. \\
+150~MHz & 6.667~ns & carry 두 번, 큰 MUX와 route가 겹치면 빠듯하다. \\
+200~MHz & 5.000~ns & 넓은 arithmetic과 memory control은 적극적인 stage 분할이 필요하다. \\
+300~MHz & 3.333~ns & logic뿐 아니라 BRAM/DSP/clock primitive의 물리 한계도 확인한다. \\
+\bottomrule
+\end{longtable}
+
+setup 조건은 개념적으로 다음과 같다.
+
+\[
+T_{clk} \ge
+T_{cq}+T_{logic}+T_{route}+T_{setup}+T_{uncertainty}-T_{skew}.
+\]
+
+10 ns clock이라고 해서 RTL의 조합 회로에 10 ns를 모두 쓸 수 있는 것이 아니다.
+Clock-to-Q, setup, skew, uncertainty가 빠지고, 실제 placement 뒤에는 logic cell
+사이 route delay가 더해진다.
+
+\section{Slack과 data path delay}
+
+required time에서 arrival time을 뺀 값이 setup slack이다. Worst Negative Slack이
+음수이면 가장 나쁜 setup path가 제약을 넘었다.
+
+\begin{itemize}
+  \item \wns $=+0.089$~ns: 최악 경로도 약 0.089 ns의 여유를 가진다.
+  \item \wns $=-0.338$~ns: 최악 경로가 요구 시각보다 약 0.338 ns 늦다.
+  \item Total Negative Slack은 실패 endpoint 전체의 정도를 함께 보여 준다.
+\end{itemize}
+
+작은 양의 WNS는 성공이지만 tool/version/seed/상위 시스템이 바뀌어도 넉넉하다는
+뜻은 아니다. timing-closed라는 사실과 margin이 충분하다는 판단을 구분한다.
+
+\section{한 개 LUT가 몇 ns라고 외울 수 없는 이유}
+
+LUT 내부 지연은 선택된 input pin, function과 output 경로에 따라 달라지고, 다음
+cell까지의 route는 placement에 따라 달라진다. carry와 MUXF는 일반 routing과
+다른 dedicated path를 쓴다. 따라서 ``LUT 하나는 0.2 ns''처럼 고정 상수를
+적용하면 실제 critical path를 잘못 예측하기 쉽다.
+
+대신 다음 순서로 빠르게 분류한다.
+
+\begin{enumerate}
+  \item LUT level이 한두 단계인지 여러 단계의 decode/MUX tree인지 본다.
+  \item CARRY4가 직렬로 몇 개 연결되는지 센다.
+  \item DSP/BRAM input 또는 output register가 활성화되어 있는지 본다.
+  \item source net의 fanout과 destination까지 physical distance를 본다.
+  \item post-route report의 logic/route 비율로 다음 수정 방향을 정한다.
+\end{enumerate}
+
+\section{실측 경로로 얻은 ns 범위}
+
+다음 값은 같은 Unified NTT 개발 과정에서 관찰한 post-route data path다. 특정
+operator의 보편적 delay가 아니라, 어떤 구조 조합이 어느 정도 budget을 요구했는지
+보여 주는 경험 범위다.
+
+\begin{longtable}{L{45mm}C{22mm}C{22mm}C{22mm}L{32mm}}
+\toprule
+경로 성격 & Data path & Logic & Route & 구조 \\
+\midrule
+\endhead
+100~MHz memory address/control & 9.077~ns & 1.681~ns & 7.396~ns & 8 LUT, route 81.5\% \\
+150~MHz subtract/correction 실험 & 6.677~ns & 2.896~ns & 3.781~ns & 13 levels, CARRY4 11 \\
+200~MHz DSP product 결합 실험 & 8.168~ns & 4.600~ns & 3.568~ns & 17 levels, CARRY4 12 \\
+최종 150~MHz arithmetic path & 6.522~ns & 2.494~ns & 4.028~ns & 7 levels, CARRY4 4 \\
+최종 complete BRAM system path & 6.550~ns & 2.920~ns & 3.630~ns & 10 levels, CARRY4 6 \\
+\bottomrule
+\end{longtable}
+
+여기서 얻는 직관은 다음과 같다.
+
+\begin{itemize}
+  \item LUT level이 8개여도 route가 7.396 ns이면 Boolean 식만 줄여서는 부족하다.
+  \item CARRY4가 11--12개 이어진 연산은 150/200 MHz 한 cycle에 두기 어렵다.
+  \item carry를 4--6개로 줄여도 3.6--4.0 ns route가 붙으므로 150 MHz가 빠듯하다.
+  \item path의 이름이 add, MUX 또는 BRAM address라는 사실보다 그 앞뒤에 붙은
+        selection과 physical distance가 중요하다.
+\end{itemize}
+
+\section{Adder와 correction의 timing}
+
+23-bit add 하나는 isolated synthesis에서 CARRY4 여섯 구간이었다. dedicated
+carry가 빠르더라도 comparator, second add/subtract와 MUX가 같은 cycle에 붙으면
+carry가 두 번 직렬로 갈 수 있다.
+
+\begin{lstlisting}
+// Two arithmetic decisions may occupy one register boundary.
+wire [23:0] diff = {1'b0, a} - {1'b0, b};
+wire [23:0] corr = diff + q;
+assign y = diff[23] ? corr[22:0] : diff[22:0];
+\end{lstlisting}
+
+range를 이용해 sign/borrow만으로 correction 조건을 만들 수 있는지, raw result와
+correction을 서로 다른 stage에 둘 수 있는지 검토한다. pipeline을 나눌 때에는
+result만 움직이지 말고 valid, mode와 writeback tag도 같이 옮긴다.
+
+\section{MUX가 arithmetic 앞과 뒤에 있을 때}
+
+\begin{lstlisting}
+// MUX then ADD
+assign y0 = a + (sel ? b : c);
+
+// ADD in parallel, then MUX
+assign y1 = sel ? (a + b) : (a + c);
+\end{lstlisting}
+
+첫 구조의 critical path는 select/data MUX 뒤에 carry가 시작될 수 있다. 두 번째
+구조는 두 add가 병렬로 진행된 뒤 result MUX를 거치므로 timing이 나아질 수 있지만
+adder가 두 개로 늘 수 있다. 합성기는 Boolean/arithmetic equivalence를 이용해
+다시 구조를 바꿀 수 있으므로 RTL 모양만으로 단정하지 않는다.
+
+Unified NTT의 공유 multiplier에서는 DSP 수 절감 가치가 크기 때문에 operand
+selection을 허용하되 mode를 transaction 동안 고정하고 stage boundary에 맞췄다.
+반면 butterfly의 add/subtract result를 너무 일찍 한 rail로 합치면 carry 뒤에
+mode MUX가 붙어 150 MHz 실패 경로가 되었다. 같은 ``공유''라도 operator 크기와
+MUX 위치에 따라 결론이 달랐다.
+
+\section{Fanout과 route delay}
+
+fanout은 한 net이 구동하는 load 수다. mode, reset, enable, state decode처럼 넓은
+hierarchy를 가로지르는 control은 작은 Boolean logic이어도 많은 sink와 긴 route를
+만든다.
+
+\begin{lstlisting}
+wire do_core = busy & mode_ok & phase_core;
+// do_core drives many datapath, memory and valid registers.
+\end{lstlisting}
+
+해결 후보는 기능에 따라 다르다.
+
+\begin{itemize}
+  \item decode를 source 가까이에서 한 번 계산하고 register한다.
+  \item 물리적으로 먼 region마다 동일한 control register를 복제한다.
+  \item phase별 data command를 먼저 register해 downstream MUX의 control 수를 줄인다.
+  \item 이미 FSM이 보장하는 중복 guard를 assertion과 함께 제거한다.
+\end{itemize}
+
+register replication은 FF를 조금 늘리고 route를 줄이는 trade-off다. 합성기가
+동일 register를 합칠 수 있으므로 필요하면 keep/max-fanout constraint를 검토하고,
+실제 replicated cell과 path를 report에서 확인한다.
+
+\section{BRAM과 DSP 경계의 timing}
+
+BRAM은 보통 synchronous read를 사용한다. address와 enable이 clock edge 전에
+안정되어야 하고 data는 정해진 read latency 뒤에 나온다. BRAM pin 바로 앞에
+bank decode, address transform과 phase MUX를 모두 놓으면 memory input path가
+critical해질 수 있다.
+
+\begin{lstlisting}
+// First register a physical command.
+always @(posedge clk) begin
+  mem_addr_q <= mapped_addr;
+  mem_bank_q <= mapped_bank;
+  mem_we_q   <= request_we;
+end
+// The BRAM-facing MUX now sees registered fields.
+\end{lstlisting}
+
+DSP도 multiplier 앞뒤 register가 hard block 안으로 들어가는지에 따라 path가
+달라진다. RTL에 wire 이름을 하나 더 붙이는 것은 pipeline이 아니다. synthesis
+결과에서 DSP A/B/M/P register와 path start/end pin을 확인한다.
+
+\section{Pipeline stage를 어디에 넣을 것인가}
+
+긴 식의 정확히 가운데 bit 수만 보고 자르는 것보다 delay가 큰 구조 사이의
+경계를 고른다.
+
+\begin{itemize}
+  \item MUX $\rightarrow$ carry가 길면 operand selection 뒤를 register한다.
+  \item carry $\rightarrow$ correction carry가 길면 raw result를 register한다.
+  \item DSP output $\rightarrow$ wide add가 길면 DSP PREG 또는 output stage를 사용한다.
+  \item address mapping $\rightarrow$ BRAM pin이 길면 physical command를 register한다.
+  \item high-fanout decode가 길면 local registered control로 분산한다.
+\end{itemize}
+
+pipeline은 latency를 늘리지만 initiation interval을 반드시 늘리지는 않는다. 각
+stage가 매 cycle 새 입력을 받아 독립적으로 진행하면 latency가 늘어도 throughput은
+유지된다. 반면 한 operator를 여러 cycle 재사용하는 FSM은 initiation interval도
+늘 수 있다.
+
+\section{Timing 개선의 원인을 확인하는 법}
+
+\begin{checklistbox}
+\begin{enumerate}
+  \item 변경 전후 같은 clock constraint와 implementation 범위를 사용한다.
+  \item startpoint, endpoint, data path delay와 slack을 기록한다.
+  \item logic delay, route delay, logic level, CARRY4 수와 fanout을 분리한다.
+  \item register를 추가했다면 모든 data/control branch의 cycle alignment를 검증한다.
+  \item 한 경로를 고친 뒤 새 worst path가 어디로 이동했는지 확인한다.
+  \item directive만 바꾼 결과와 RTL 구조를 바꾼 결과를 구분한다.
+  \item OOC internal path와 complete-system endpoint path를 섞지 않는다.
+\end{enumerate}
+\end{checklistbox}

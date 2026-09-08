@@ -1,0 +1,261 @@
+\chapter{Verilog 구문을 실제 회로로 번역하는 법}
+
+\begin{summarybox}[이 장의 관점]
+RTL을 읽을 때에는 문법의 뜻과 생성되는 회로를 동시에 말할 수 있어야 한다.
+\rtlfile{assign}은 조합 회로, clocked \rtlfile{always}의 nonblocking assignment는
+register, 조건문은 data 또는 enable을 고르는 MUX가 된다. loop는 시간을 두고
+반복 실행되는 문장이 아니라 elaboration 과정에서 펼쳐지는 병렬 하드웨어다.
+\end{summarybox}
+
+\section{Continuous assignment와 combinational cone}
+
+\begin{lstlisting}
+wire [22:0] x = (a ^ b) + c;
+\end{lstlisting}
+
+이 코드는 XOR를 한 다음 다음 cycle에 add하는 순차 동작이 아니다. \rtlfile{a},
+\rtlfile{b}, \rtlfile{c}가 바뀌면 XOR와 carry chain을 거쳐 \rtlfile{x}가 안정되는
+하나의 combinational cone이다. 중간 wire를 추가해도 register가 아니므로 timing
+경계는 생기지 않는다.
+
+\begin{lstlisting}
+wire [22:0] xor_w = a ^ b;
+wire [22:0] x     = xor_w + c;
+\end{lstlisting}
+
+두 번째 표현은 debug와 report tracing에는 도움이 되지만 첫 번째 표현과 같은
+회로로 최적화될 수 있다. pipeline을 만들려면 clock edge에서 값을 저장해야 한다.
+
+\section{Clocked always block과 register input MUX}
+
+\begin{lstlisting}
+always @(posedge clk) begin
+  if (rst)
+    q <= 23'd0;
+  else if (en)
+    q <= d;
+end
+\end{lstlisting}
+
+이 블록은 \rtlfile{q}의 모든 bit에 FF를 만든다. \rtlfile{rst}와 \rtlfile{en}은
+코드가 위에 있다고 먼저 실행되는 연산이 아니라 FF의 reset/enable 기능 또는
+D input 앞 MUX로 구현된다. exact mapping은 reset 형태와 target primitive,
+optimization에 따라 달라진다.
+
+clocked block 안에서 여러 nonblocking assignment가 있으면 오른쪽 식은 모두
+현재 cycle의 값을 읽고, 왼쪽 register는 같은 edge 뒤에 함께 갱신된다.
+
+\begin{lstlisting}
+always @(posedge clk) begin
+  a_q <= in;
+  b_q <= a_q;
+end
+\end{lstlisting}
+
+여기서 \rtlfile{b\_q}는 새 \rtlfile{in}이 아니라 이전 \rtlfile{a\_q}를 받는다.
+따라서 두 stage pipeline이 된다. 이 cycle 의미를 이해해야 data와 valid, mode,
+address를 같은 stage로 이동시킬 수 있다.
+
+\section{Blocking과 nonblocking: 회로 종류보다 stage 의미}
+
+조합 block에서는 blocking assignment로 위에서 계산한 임시 값을 아래 식에
+사용하는 것이 자연스럽다.
+
+\begin{lstlisting}
+always @* begin
+  sum_w = a + b;
+  if (sum_w >= Q)
+    out_w = sum_w - Q;
+  else
+    out_w = sum_w;
+end
+\end{lstlisting}
+
+이 코드는 add와 correction이 같은 cycle에 직렬로 놓인다는 점이 핵심이다.
+blocking assignment를 썼기 때문에 software처럼 시간이 흐르는 것이 아니다.
+
+clocked block에는 nonblocking assignment를 사용해 각 register stage의 이전 값과
+다음 값을 분명히 한다.
+
+\begin{lstlisting}
+always @(posedge clk) begin
+  raw_q <= a + b;
+  if (raw_q >= Q)
+    corr_q <= raw_q - Q;
+  else
+    corr_q <= raw_q;
+end
+\end{lstlisting}
+
+이 표현은 add와 correction을 서로 다른 register 경계에 둔다. latency가 한
+cycle 늘고 throughput은 매 cycle 새 입력을 받을 수 있다. control signal도 같은
+cycle만큼 지연해야 한다.
+
+\section{if, case와 MUX 구조}
+
+조건에 따라 하나의 register 또는 wire에 여러 값을 대입하면 data selection이
+필요하다.
+
+\begin{lstlisting}
+always @* begin
+  case (mode)
+    2'd0: y = a;
+    2'd1: y = b;
+    2'd2: y = c;
+    default: y = d;
+  endcase
+end
+\end{lstlisting}
+
+배타적인 네 선택지는 일반적으로 4:1 MUX 구조다. 반면 다음 코드는 첫 조건이
+가장 높은 우선순위를 가져야 하므로 priority chain이 된다.
+
+\begin{lstlisting}
+always @* begin
+  if      (req[0]) y = d0;
+  else if (req[1]) y = d1;
+  else if (req[2]) y = d2;
+  else             y = d3;
+end
+\end{lstlisting}
+
+priority가 기능 요구라면 이 구조가 맞다. 선택지가 원래 one-hot 또는 mutually
+exclusive라면 그 계약을 assertion으로 검증하고 평행 selection이 드러나는
+구조를 쓸 수 있다. 단순히 \rtlfile{case}가 언제나 빠르다고 외우지 않고 기능적
+우선순위가 필요한지 먼저 판단한다.
+
+\section{조합 block의 incomplete assignment와 latch}
+
+\begin{lstlisting}
+always @* begin
+  if (en)
+    y = d;
+end
+\end{lstlisting}
+
+\rtlfile{en=0}일 때 \rtlfile{y} 값을 정의하지 않았으므로 이전 값을 유지해야 한다.
+clock이 없는데 상태를 보존하려면 level-sensitive latch가 필요하다. 의도하지 않은
+latch는 timing 분석과 검증을 복잡하게 만든다.
+
+\begin{lstlisting}
+always @* begin
+  y = 23'd0;
+  if (en)
+    y = d;
+end
+\end{lstlisting}
+
+기본값을 먼저 주면 모든 입력 조건에서 값이 정의되고 MUX로 합성된다. latch가
+정말 필요한 회로라면 의도를 명시하고, 대부분의 synchronous datapath에서는
+조합 output을 완전히 대입한다.
+
+\section{for loop와 generate: 공간 복제인지 시간 반복인지}
+
+\begin{lstlisting}
+integer i;
+always @* begin
+  for (i = 0; i < 4; i = i + 1)
+    y[i] = a[i] ^ b[i];
+end
+\end{lstlisting}
+
+고정 횟수 loop는 네 번의 XOR 하드웨어로 펼쳐진다. 한 개의 XOR가 네 cycle 동안
+재사용되는 구조가 아니다. $N$개의 butterfly를 generate하면 대체로 $N$개의
+datapath가 생긴다. 시간 공유를 원하면 counter/FSM, operand MUX, result register와
+latency protocol을 직접 설계해야 한다.
+
+\begin{summarybox}[병렬도와 면적의 첫 근사]
+폭 $W$의 operator를 $P$개 병렬 생성하면 일반 fabric 비용은 대략
+\[
+  A \propto W\times P\times C_{op}
+\]
+에서 시작한다. 실제 합성에서는 constant propagation, resource sharing, DSP/BRAM
+mapping과 packing이 이 값을 바꾼다. loop bound와 generate count는 면적을 읽을 때
+가장 먼저 확인할 숫자다.
+\end{summarybox}
+
+\section{Reduction과 bitwise/logical operator}
+
+다음 세 표현은 다른 회로다.
+
+\begin{lstlisting}
+wire [22:0] bit_or = a | b;
+wire        red_or = |a;
+wire        log_or = a || b;
+\end{lstlisting}
+
+\rtlfile{a|b}는 23개의 1-bit OR가 병렬로 존재한다. \rtlfile{|a}는 23 bit를
+하나로 모으는 reduction tree다. \rtlfile{a||b}는 두 bus가 각각 zero인지 판단한
+뒤 두 Boolean 결과를 OR한다. reduction 결과가 넓은 enable과 memory selection을
+구동하면 작은 LUT count와 별개로 fanout/route 병목이 될 수 있다.
+
+Unified NTT에서 13-stage valid vector의 reduction OR는 isolated cost가 3 LUT에
+불과했다. 하지만 그 결과가 BUSY와 memory phase control까지 연결되어 있었기
+때문에 occupancy counter로 상태를 local하게 만든 것이 timing에 의미가 있었다.
+
+\section{비트 폭: 저장 면적과 arithmetic 깊이를 동시에 결정한다}
+
+Verilog expression의 폭을 암묵적으로 두면 의도하지 않은 truncation 또는
+extension이 생길 수 있다.
+
+\begin{lstlisting}
+wire [22:0] a, b;
+wire [23:0] full_sum = {1'b0, a} + {1'b0, b};
+wire [22:0] wrap_sum = a + b;
+\end{lstlisting}
+
+첫 식은 carry-out까지 보존한다. 두 번째는 23 bit에서 wrap된다. 모듈러 연산에서
+어느 범위를 보존해야 하는지 증명한 뒤 최소 폭을 선택한다. 한 bit를 줄이면 해당
+register, MUX, adder, comparator와 배선에서 반복적으로 자원이 줄 수 있다.
+
+반대로 필요한 guard bit를 제거하면 일부 입력에서만 틀리는 오류가 생긴다. 폭
+최적화는 simulation 몇 개가 아니라 operand range와 intermediate bound를 근거로
+해야 한다.
+
+\section{signed와 unsigned: 같은 bit pattern을 다르게 해석한다}
+
+FPGA 배선에는 부호 표지가 없다. signedness는 comparison, extension, shift와
+arithmetic 식을 합성하는 규칙이다. \rtlfile{4'b1111}은 unsigned 15이기도 하고
+signed $-1$이기도 하다.
+
+\begin{lstlisting}
+wire signed [8:0] diff =
+    $signed({1'b0, a8}) - $signed({1'b0, b8});
+wire [7:0] corrected = diff[8] ? diff + Q : diff[7:0];
+\end{lstlisting}
+
+unsigned operand 두 개를 빼더라도 음수 여부가 필요하면 한 bit 확장한 signed
+intermediate 또는 borrow를 보존해야 한다. signed와 unsigned를 섞은 comparison은
+먼저 같은 폭과 의도한 부호로 명시적으로 cast한다.
+
+\begin{warningbox}[상수의 폭도 회로의 일부다]
+unsized literal과 signed literal은 expression 폭과 부호 확장에 영향을 줄 수
+있다. 특히 parameterized RTL에서는 \rtlfile{23'd...}, \rtlfile{\$signed(...)}와
+명시적 concatenation으로 intermediate 폭을 읽을 수 있게 만든다. synthesis
+warning이 없다는 사실은 수학적 범위가 맞다는 증명이 아니다.
+\end{warningbox}
+
+\section{연산자를 보자마자 그릴 수 있어야 하는 회로}
+
+\begin{longtable}{L{35mm}L{52mm}L{72mm}}
+\toprule
+RTL 표현 & 우선 떠올릴 회로 & 다음 질문 \\
+\midrule
+\endhead
+\rtlfile{a \& b}, \rtlfile{a \^ b} & bit별 LUT 병렬 구조 & output 폭과 LUT packing은? \\
+\rtlfile{|a} & reduction tree & level과 결과 fanout은? \\
+\rtlfile{a+b}, \rtlfile{a-b} & LUT + carry chain & 폭과 앞뒤 MUX는? \\
+\rtlfile{a==b} & XNOR/reduction 성격 & constant bit가 제거되는가? \\
+\rtlfile{a<b} & magnitude/borrow 구조 & signedness와 폭은? \\
+ternary, case & bit별 MUX & input 수, priority, select fanout은? \\
+\rtlfile{a<<3} & 배선 재배치 & 잘려 나가는 bit와 width는? \\
+\rtlfile{a<<shamt} & barrel MUX & shift 후보 수와 stage는? \\
+\rtlfile{a*b} & DSP 또는 fabric multiplier & operand 폭, signedness, DSP budget은? \\
+clocked assignment & FF 또는 hard-block register & reset/enable과 stage alignment는? \\
+fixed loop/generate & 병렬 복제 hardware & unroll 개수와 공유 의도는? \\
+array read/write & FF/LUTRAM/BRAM 후보 & port와 synchronous-read template은? \\
+\bottomrule
+\end{longtable}
+
+이 번역표는 정확한 utilization 표가 아니다. RTL review에서 회로 후보를 빠르게
+그린 뒤 synthesis 결과로 수정하기 위한 첫 모델이다.

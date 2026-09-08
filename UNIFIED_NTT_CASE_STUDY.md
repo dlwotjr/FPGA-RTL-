@@ -51,6 +51,9 @@ pipeline alignment, scheduler와 interface를 개선하는 것이었습니다.
 23 LUT와 6 CARRY4, 한-cycle modular subtraction이 46 LUT와 12 CARRY4,
 23-bit 2:1/4:1 MUX가 각각 23 LUT로 구현되었습니다. Constant shift는 0 LUT,
 variable shift는 64 LUT였으며 23x16 multiply는 DSP48E1 한 개로 흡수됐습니다.
+16-cycle×23-bit delay는 reset이 없을 때 SRL16E 23개와 FF 46개, 전체 delay를
+reset하면 SRL 없이 FF 368개로 합성됐습니다. 32×8 asynchronous-read memory는
+LUTRAM 8개, 576×23 synchronous memory는 RAMB36E1 한 개를 사용했습니다.
 재현 자료는 [operator-cost micro-benchmark](examples/operator_cost)에 있습니다.
 
 - Production configuration에서 네 32-bit cycle counter/incrementer 제거
